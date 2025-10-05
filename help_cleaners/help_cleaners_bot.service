@@ -1,0 +1,18 @@
+[Unit]
+Description=Help Cleaners Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/help_cleaners
+Environment="PATH=/opt/help_cleaners/venv/bin"
+ExecStart=/opt/help_cleaners/venv/bin/python3 /opt/help_cleaners/help_cleaners/main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
