@@ -570,12 +570,13 @@ async def cmd_shift(message: Message, session: AsyncSession):
 		else:
 			# 🌅 Дневная смена: с 09:00 до 21:00 - записываем на текущий день
 			await _upsert_shift(session, chat_id, user_id, shift_date, shift_type)
-			await schedule_reminders_for_shift(chat_id, shift_date, shift_type, session)
-			
-			shift_name = {"day": "дневная"}[shift_type]
-			reply = await message.reply(f"✅ Смена записана: {shift_name} {shift_date.strftime('%d.%m')}")
-		
-		asyncio.create_task(_autodelete(message, reply))
+	
+	await schedule_reminders_for_shift(chat_id, shift_date, shift_type, session)
+	
+	shift_name = {"day": "дневная"}[shift_type]
+	reply = await message.reply(f"✅ Смена записана: {shift_name} {shift_date.strftime('%d.%m')}")
+	
+	asyncio.create_task(_autodelete(message, reply))
 
 
 @router.callback_query(F.data.startswith("shift:"))
@@ -675,15 +676,16 @@ async def cb_shift(callback: CallbackQuery, session: AsyncSession):
 	else:
 		# 🌅 Дневная смена: с 09:00 до 21:00 - записываем на текущий день
 		await _upsert_shift(session, chat_id, user_id, shift_date, shift_type)
-		await schedule_reminders_for_shift(chat_id, shift_date, shift_type, session)
-		
-		# Отправляем подтверждение и удаляем кнопки
-		await callback.message.edit_text(
-			f"✅ **Дневная смена записана!**\n\n"
-			f"🌅 **Дата:** {shift_date.strftime('%d.%m')}\n"
-			f"⏰ **Время:** 09:00 - 21:00\n\n"
-			f"📸 Отправляйте фото во время смены для записи в табель!"
-		)
+	
+	await schedule_reminders_for_shift(chat_id, shift_date, shift_type, session)
+	
+	# Отправляем подтверждение и удаляем кнопки
+	await callback.message.edit_text(
+		f"✅ **Дневная смена записана!**\n\n"
+		f"🌅 **Дата:** {shift_date.strftime('%d.%m')}\n"
+		f"⏰ **Время:** 09:00 - 21:00\n\n"
+		f"📸 Отправляйте фото во время смены для записи в табель!"
+	)
 	
 	# mark processed
 	session.add(ProcessedCallback(id=cb_id, created_at=datetime.utcnow()))
@@ -928,10 +930,18 @@ async def cmd_addchat(message: Message, session: AsyncSession):
 			if chat_id not in ALLOWED_CHATS:
 				ALLOWED_CHATS.append(chat_id)
 			
-			await message.reply(f"✅ Группа {chat_title} снова активирована!")
+			reply = await message.reply(f"✅ Группа {chat_title} снова активирована!")
+			# Удаляем сообщение бота через 30 секунд
+			asyncio.create_task(auto_delete_message(reply, 30))
+			# Удаляем команду пользователя через 3 секунды
+			asyncio.create_task(auto_delete_message(message, 3))
 		else:
 			# Группа уже активна
-			await message.reply(f"✅ Группа {chat_title} уже в списке разрешенных.")
+			reply = await message.reply(f"✅ Группа {chat_title} уже в списке разрешенных.")
+			# Удаляем сообщение бота через 30 секунд
+			asyncio.create_task(auto_delete_message(reply, 30))
+			# Удаляем команду пользователя через 3 секунды
+			asyncio.create_task(auto_delete_message(message, 3))
 		return
 	
 	# Создаем новую запись
@@ -950,7 +960,11 @@ async def cmd_addchat(message: Message, session: AsyncSession):
 	if chat_id not in ALLOWED_CHATS:
 		ALLOWED_CHATS.append(chat_id)
 	
-	await message.reply(f"✅ Группа {chat_title} добавлена в список разрешенных!")
+	reply = await message.reply(f"✅ Группа {chat_title} добавлена в список разрешенных!")
+	# Удаляем сообщение бота через 30 секунд
+	asyncio.create_task(auto_delete_message(reply, 30))
+	# Удаляем команду пользователя через 3 секунды
+	asyncio.create_task(auto_delete_message(message, 3))
 
 
 @router.message(Command("removechat"))
@@ -1007,8 +1021,13 @@ async def cmd_listchats(message: Message, session: AsyncSession):
 		return
 	
 	from aiogram import Bot
-	from app.config import BOT_TOKEN, ALLOWED_CHATS
-	bot = Bot(token=BOT_TOKEN)
+	from app.config import ALLOWED_CHATS
+	# Получаем токен из settings (как в main.py)
+	import os
+	from dotenv import load_dotenv
+	load_dotenv()
+	bot_token = os.getenv("BOT_TOKEN", "").strip()
+	bot = Bot(token=bot_token)
 	
 	# Получаем список разрешенных групп из БД
 	allowed_chats = await session.execute(
@@ -1082,14 +1101,25 @@ async def cmd_listchats(message: Message, session: AsyncSession):
 	
 	text = "📋 РАЗРЕШЁННЫЕ ГРУППЫ\n\n"
 	
+	# Создаём клавиатуру для кнопок удаления
+	from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+	from aiogram.utils.keyboard import InlineKeyboardBuilder
+	keyboard = InlineKeyboardBuilder()
+	
 	if all_active:
 		text += "🟢 АКТИВНЫЕ ГРУППЫ:\n\n"
-		for chat in all_active:
+		for i, chat in enumerate(all_active):
 			text += f"{chat['status']} {chat['chat_title']}\n"
 			text += f"   ID: {chat['chat_id']}\n"
 			if chat.get('added_at'):
 				text += f"   Добавлена: {chat['added_at'].strftime('%d.%m.%Y %H:%M')}\n"
-			text += "\n"
+			text += f"   └─ Нажмите кнопку ниже для удаления\n\n"
+			
+			# Добавляем кнопку удаления для этой группы
+			keyboard.button(
+				text=f"🗑️ Удалить: {chat['chat_title'][:20]}...",
+				callback_data=f"remove_chat:{chat['chat_id']}"
+			)
 	
 	if inactive_chats:
 		text += "\n🔴 НЕАКТИВНЫЕ (бот не состоит в группе):\n\n"
@@ -1101,7 +1131,71 @@ async def cmd_listchats(message: Message, session: AsyncSession):
 			text += "\n"
 		text += "💡 Неактивные группы были автоматически удалены из списка разрешённых.\n"
 	
-	await message.reply(text)
+	# Настраиваем клавиатуру - по одной кнопке в ряд
+	keyboard.adjust(1)
+	
+	if all_active or inactive_chats:
+		reply = await message.reply(text, reply_markup=keyboard.as_markup())
+		# Удаляем сообщение бота через 30 секунд
+		asyncio.create_task(auto_delete_message(reply, 30))
+	else:
+		reply = await message.reply(text)
+		# Удаляем сообщение бота через 30 секунд
+		asyncio.create_task(auto_delete_message(reply, 30))
+	
+	# Удаляем команду пользователя через 3 секунды
+	asyncio.create_task(auto_delete_message(message, 3))
+
+
+@router.callback_query(F.data.startswith("remove_chat:"))
+async def cb_remove_chat(callback: CallbackQuery, session: AsyncSession):
+	"""
+	🔒 Callback для удаления группы из списка разрешённых.
+	"""
+	# Проверяем права владельца
+	if callback.from_user.id != OWNER_ID:
+		await callback.answer("❌ У вас нет прав для этого действия.", show_alert=True)
+		return
+	
+	# Извлекаем chat_id из callback_data
+	chat_id = int(callback.data.split(":")[1])
+	
+	from app.config import ALLOWED_CHATS
+	
+	# Убираем группу из БД
+	result = await session.execute(
+		update(AllowedChat)
+		.where(AllowedChat.chat_id == chat_id)
+		.values(is_active=False)
+	)
+	await session.commit()
+	
+	# Убираем группу из конфига ALLOWED_CHATS
+	if chat_id in ALLOWED_CHATS:
+		ALLOWED_CHATS.remove(chat_id)
+	
+	if result.rowcount > 0:
+		await callback.answer("✅ Группа удалена из списка разрешённых!", show_alert=True)
+		# Обновляем сообщение, убирая кнопку удалённой группы
+		updated_message = await callback.message.edit_text(
+			f"{callback.message.text}\n\n🗑️ Группа (ID: {chat_id}) удалена из списка."
+		)
+		# Удаляем обновлённое сообщение через 30 секунд
+		asyncio.create_task(auto_delete_message(updated_message, 30))
+		
+		# Пытаемся выйти из группы
+		try:
+			from aiogram import Bot
+			import os
+			from dotenv import load_dotenv
+			load_dotenv()
+			bot_token = os.getenv("BOT_TOKEN", "").strip()
+			bot = Bot(token=bot_token)
+			await bot.leave_chat(chat_id)
+		except Exception:
+			pass  # Группа может быть уже недоступна
+	else:
+		await callback.answer("❌ Группа не найдена в списке.", show_alert=True)
 
 
 @router.message(Command("myshifts"))
@@ -1575,7 +1669,7 @@ async def _autodelete(src: Message, reply: Message, delay: int = 15) -> None:
 		await reply.delete()
 		await src.delete()
 	except Exception:
-		return
+		return 
 
 
 # ==================== НОВЫЕ КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ ТАБЕЛЕМ ====================
