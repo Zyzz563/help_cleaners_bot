@@ -999,11 +999,16 @@ async def cmd_removechat(message: Message, session: AsyncSession):
 async def cmd_listchats(message: Message, session: AsyncSession):
 	"""
 	🔒 Команда владельца: показать список разрешенных групп.
+	Автоматически проверяет статус бота в каждой группе.
 	"""
 	# Проверяем права владельца
 	if not await check_owner_permission(message):
 		await message.reply("❌ У вас нет прав для этой команды.")
 		return
+	
+	from aiogram import Bot
+	from app.config import BOT_TOKEN, ALLOWED_CHATS
+	bot = Bot(token=BOT_TOKEN)
 	
 	# Получаем список разрешенных групп из БД
 	allowed_chats = await session.execute(
@@ -1012,8 +1017,43 @@ async def cmd_listchats(message: Message, session: AsyncSession):
 	
 	chats = allowed_chats.scalars().all()
 	
-	# Добавляем группы из конфига
-	from app.config import ALLOWED_CHATS
+	active_chats = []
+	inactive_chats = []
+	
+	# Проверяем каждую группу - состоит ли бот в ней
+	for chat in chats:
+		try:
+			# Пытаемся получить информацию о группе
+			chat_info = await bot.get_chat(chat.chat_id)
+			# Если бот получил информацию, значит он состоит в группе
+			active_chats.append({
+				"chat_id": chat.chat_id,
+				"chat_title": chat_info.title or chat.chat_title,
+				"added_at": chat.added_at,
+				"status": "✅ Активна"
+			})
+			# Обновляем название группы в БД, если изменилось
+			if chat_info.title and chat_info.title != chat.chat_title:
+				chat.chat_title = chat_info.title
+				await session.commit()
+		except Exception:
+			# Если ошибка - бот не состоит в группе, помечаем как неактивную
+			inactive_chats.append({
+				"chat_id": chat.chat_id,
+				"chat_title": chat.chat_title,
+				"added_at": chat.added_at,
+				"status": "❌ Неактивна"
+			})
+			# Автоматически деактивируем группу в БД
+			chat.is_active = False
+			# Убираем из конфига ALLOWED_CHATS
+			if chat.chat_id in ALLOWED_CHATS:
+				ALLOWED_CHATS.remove(chat.chat_id)
+	
+	# Сохраняем изменения
+	await session.commit()
+	
+	# Проверяем группы из конфига
 	config_chats = []
 	for chat_id in ALLOWED_CHATS:
 		# Проверяем есть ли уже в БД
@@ -1021,24 +1061,45 @@ async def cmd_listchats(message: Message, session: AsyncSession):
 			select(AllowedChat).where(AllowedChat.chat_id == chat_id)
 		)
 		if not existing.scalar_one_or_none():
-			config_chats.append({
-				"chat_id": chat_id,
-				"chat_title": f"Группа из конфига (ID: {chat_id})",
-				"added_at": datetime.utcnow()
-			})
+			try:
+				chat_info = await bot.get_chat(chat_id)
+				config_chats.append({
+					"chat_id": chat_id,
+					"chat_title": chat_info.title or f"Группа (ID: {chat_id})",
+					"added_at": None,
+					"status": "✅ Активна (из конфига)"
+				})
+			except Exception:
+				# Группа из конфига недоступна
+				ALLOWED_CHATS.remove(chat_id)
 	
 	# Объединяем списки
-	all_chats = list(chats) + config_chats
+	all_active = active_chats + config_chats
 	
-	if not all_chats:
+	if not all_active and not inactive_chats:
 		await message.reply("📋 Список разрешенных групп пуст.")
 		return
 	
-	text = "📋 Разрешенные группы:\n\n"
-	for chat in all_chats:
-		text += f"• {chat.chat_title or 'Без названия'}\n"
-		text += f"  ID: {chat.chat_id}\n"
-		text += f"  Добавлена: {chat.added_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+	text = "📋 РАЗРЕШЁННЫЕ ГРУППЫ\n\n"
+	
+	if all_active:
+		text += "🟢 АКТИВНЫЕ ГРУППЫ:\n\n"
+		for chat in all_active:
+			text += f"{chat['status']} {chat['chat_title']}\n"
+			text += f"   ID: {chat['chat_id']}\n"
+			if chat.get('added_at'):
+				text += f"   Добавлена: {chat['added_at'].strftime('%d.%m.%Y %H:%M')}\n"
+			text += "\n"
+	
+	if inactive_chats:
+		text += "\n🔴 НЕАКТИВНЫЕ (бот не состоит в группе):\n\n"
+		for chat in inactive_chats:
+			text += f"{chat['status']} {chat['chat_title']}\n"
+			text += f"   ID: {chat['chat_id']}\n"
+			if chat.get('added_at'):
+				text += f"   Была добавлена: {chat['added_at'].strftime('%d.%m.%Y %H:%M')}\n"
+			text += "\n"
+		text += "💡 Неактивные группы были автоматически удалены из списка разрешённых.\n"
 	
 	await message.reply(text)
 
