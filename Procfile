@@ -1,0 +1,1 @@
+worker: python help_cleaners/main.py
