@@ -1,1 +1,1 @@
-worker: python help_cleaners/main.py
+web: python help_cleaners/main.py
