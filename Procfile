@@ -1,1 +1,1 @@
-web: python help_cleaners/main.py
+worker: ./start.sh
