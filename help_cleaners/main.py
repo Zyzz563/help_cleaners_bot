@@ -1,15 +1,13 @@
 import asyncio
 import logging
 import os
-from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from app.handlers import commands_router, photos_router
 from app.database import init_db
 
-# Load environment variables
-load_dotenv()
+# Environment variables are loaded by Railway automatically
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
