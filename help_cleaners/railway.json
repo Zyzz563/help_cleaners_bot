@@ -1,0 +1,11 @@
+# Railway/Render deployment configuration
+# This file tells the platform how to run our bot
+
+# Set Python version
+python-version: 3.11
+
+# Install dependencies
+install-command: pip install -r requirements.txt
+
+# Run command
+run-command: python help_cleaners/main.py

@@ -46,6 +46,29 @@ async def check_chat_allowed(message: Message, session: AsyncSession) -> bool:
 	"""
 	chat_id = message.chat.id
 	
+	# Если это личное сообщение - разрешаем только владельцу
+	if message.chat.type == "private":
+		if message.from_user and message.from_user.id == OWNER_ID:
+			return True
+		else:
+			# Для личных сообщений показываем приветствие
+			await message.reply(
+				"👋 Привет! Я бот для управления клинерами.\n\n"
+				"🤖 **О боте:**\n"
+				"Я помогаю отслеживать работу клинеров, управлять сменами и обнаруживать дубликаты фотографий.\n\n"
+				"📋 **Основные функции:**\n"
+				"• Регистрация клинеров\n"
+				"• Управление сменами (дневные/ночные)\n"
+				"• Табель рабочих дней\n"
+				"• Обнаружение дубликатов фото\n"
+				"• Статистика работы\n\n"
+				"ℹ️ **Как использовать:**\n"
+				"Добавьте меня в группу и используйте команду /addchat для разрешения работы.\n\n"
+				"👨‍💻 **Создатель:** Азиз\n"
+				"📅 **Обновлено:** 2025"
+			)
+			return False
+	
 	# Сначала проверяем в конфигурации (для быстрого доступа)
 	if chat_id in ALLOWED_CHATS:
 		return True
@@ -150,6 +173,43 @@ class TimesheetStates(StatesGroup):
 	
 	# Для удаления смены
 	waiting_remove_date = State()  # Ожидание выбора даты для удаления
+
+
+@router.message(Command("start"))
+async def cmd_start(message: Message, session: AsyncSession):
+	"""
+	Команда /start - приветствие и информация о боте.
+	"""
+	# Если это личное сообщение - показываем приветствие
+	if message.chat.type == "private":
+		await message.reply(
+			"👋 Привет! Я бот для управления клинерами.\n\n"
+			"🤖 **О боте:**\n"
+			"Я помогаю отслеживать работу клинеров, управлять сменами и обнаруживать дубликаты фотографий.\n\n"
+			"📋 **Основные функции:**\n"
+			"• Регистрация клинеров\n"
+			"• Управление сменами (дневные/ночные)\n"
+			"• Табель рабочих дней\n"
+			"• Обнаружение дубликатов фото\n"
+			"• Статистика работы\n\n"
+			"ℹ️ **Как использовать:**\n"
+			"Добавьте меня в группу и используйте команду /addchat для разрешения работы.\n\n"
+			"👨‍💻 **Создатель:** Азиз\n"
+			"📅 **Обновлено:** 2025\n\n"
+			"💡 **Доступные команды:**\n"
+			"/help - полный список команд\n"
+			"/register - регистрация клинера\n"
+			"/shift - записаться на смену\n"
+			"/tabel - мой табель\n"
+			"/duplicates - список дубликатов"
+		)
+		return
+	
+	# Если это группа - проверяем разрешения
+	if not await check_chat_allowed(message, session):
+		return
+	
+	await message.reply("👋 Бот запущен! Используйте /help для списка команд.")
 
 
 @router.message(Command("register"))
@@ -570,13 +630,12 @@ async def cmd_shift(message: Message, session: AsyncSession):
 		else:
 			# 🌅 Дневная смена: с 09:00 до 21:00 - записываем на текущий день
 			await _upsert_shift(session, chat_id, user_id, shift_date, shift_type)
-	
-	await schedule_reminders_for_shift(chat_id, shift_date, shift_type, session)
-	
-	shift_name = {"day": "дневная"}[shift_type]
-	reply = await message.reply(f"✅ Смена записана: {shift_name} {shift_date.strftime('%d.%m')}")
-	
-	asyncio.create_task(_autodelete(message, reply))
+			await schedule_reminders_for_shift(chat_id, shift_date, shift_type, session)
+			
+			shift_name = {"day": "дневная"}[shift_type]
+			reply = await message.reply(f"✅ Смена записана: {shift_name} {shift_date.strftime('%d.%m')}")
+			
+			asyncio.create_task(_autodelete(message, reply))
 
 
 @router.callback_query(F.data.startswith("shift:"))
@@ -828,7 +887,64 @@ async def cb_start_register(callback: CallbackQuery, state: FSMContext):
 
 @router.message(Command("help"))
 async def cmd_help(message: Message, session: AsyncSession):
-	# 🔒 Проверяем разрешен ли чат
+	# Если это личное сообщение - показываем справку без проверки чата
+	if message.chat.type == "private":
+		await message.reply(
+			"🤖 **HELP CLEANERS | KZN**\n\n"
+			"**О боте:**\n"
+			"Этот бот создан для автоматизации работы клининговых бригад. "
+			"Он помогает вести учет смен, отслеживать дубликаты фотографий, "
+			"вести табель и управлять персоналом.\n\n"
+			
+			"**📋 Основные функции:**\n"
+			"• Регистрация клинеров в группе\n"
+			"• Управление сменами (дневные/ночные/комбо)\n"
+			"• Автоматическое ведение табеля\n"
+			"• Детекция дубликатов фотографий\n"
+			"• Система напоминаний о сменах\n\n"
+			
+			"**🔧 Доступные команды:**\n\n"
+			"**👤 Регистрация и управление:**\n"
+			"• 📝 /register — регистрация в группе\n"
+			"• 👥 /cleaners — список всех клинеров\n\n"
+			
+			"**⏰ Смены и табель:**\n"
+			"• 🕐 /shift — установить смену (день/ночь/комбо)\n"
+			"• 📅 /today — кто сегодня на смене\n"
+			"• 📊 /tabel — мой табель за 30 дней\n"
+			"• 📋 /myshifts — мои смены\n\n"
+			
+			"**📸 Фотографии:**\n"
+			"• Отправляйте фото для подтверждения работы\n"
+			"• Автоматическое обнаружение дубликатов\n"
+			"• 🔍 /duplicates — список дубликатов за 30 дней\n\n"
+			
+			"**🔒 Команды владельца:**\n"
+			"• ➕ /addchat — добавить группу в разрешенные\n"
+			"• ➖ /removechat — убрать группу из разрешенных\n"
+			"• 📋 /listchats — список разрешенных групп\n\n"
+			
+			"**ℹ️ Дополнительно:**\n"
+			"• ❓ /help — эта справка\n"
+			"• 🔄 /reset — сброс состояния регистрации\n\n"
+			
+			"**💡 Как это работает:**\n"
+			"1. Зарегистрируйтесь командой 📝 /register\n"
+			"2. Установите смену командой 🕐 /shift\n"
+			"3. Отправляйте фото во время работы\n"
+			"4. Бот автоматически ведет табель\n"
+			"5. Проверяйте прогресс командой 📊 /tabel\n\n"
+			
+			"**👨‍💻 Создатель:** Азиз\n"
+			"**🔐 Версия:** 2.0\n"
+			"**📅 Обновлено:** 2025\n\n"
+			
+			"*Нажмите на любую команду выше, чтобы выполнить её!*",
+			parse_mode="Markdown"
+		)
+		return
+	
+	# 🔒 Проверяем разрешен ли чат для групп
 	if not await check_chat_allowed(message, session):
 		return
 	
