@@ -1,3 +1,3 @@
 #!/bin/bash
 cd help_cleaners
-python main.py
+python3 main.py
