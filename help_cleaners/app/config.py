@@ -15,41 +15,41 @@ DEFAULT_LUNCH_END = "14:00"
 MAX_NAME_LEN = 10
 
 # 🔒 БЕЗОПАСНОСТЬ БОТА
-OWNER_ID = 6405212136  # ID владельца бота (только он может добавлять группы)
+OWNER_ID = int(os.getenv("OWNER_ID", "6405212136"))
 ALLOWED_CHATS = [
-	# Добавьте сюда ID групп, где бот может работать
-	-4844509202,  # Текущая группа где бот работает
-	# -1001234567890,  # Пример группы
+    # Добавьте сюда ID групп, где бот может работать
+    -4844509202,  # Текущая группа где бот работает
+    # -1001234567890,  # Пример группы
 ]
 
 
 @dataclass
 class Settings:
-	bot_token: str
-	env: str = "development"
-	database_url: str = "sqlite+aiosqlite:///./data/dev.db"
+    bot_token: str
+    env: str = "development"
+    database_url: str = "sqlite+aiosqlite:///./data/dev.db"
 
-	@staticmethod
-	def from_env() -> "Settings":
-		bot_token = os.getenv("BOT_TOKEN", "").strip()
-		if not bot_token:
-			# Fallback for Railway deployment
-			bot_token = "7669076544:AAF7D9FSNqzclEos9AP3NSDyZ0U3fjUsDbk"
-		return Settings(
-			bot_token=bot_token,
-			env=os.getenv("ENV", "development"),
-			database_url=os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/dev.db"),
-		)
+    @staticmethod
+    def from_env() -> "Settings":
+        bot_token = os.getenv("BOT_TOKEN", "").strip()
+        if not bot_token:
+            # Fallback for Railway deployment
+            bot_token = "7669076544:AAF7D9FSNqzclEos9AP3NSDyZ0U3fjUsDbk"
+        return Settings(
+            bot_token=bot_token,
+            env=os.getenv("ENV", "development"),
+            database_url=os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/dev.db"),
+        )
 
 
 def default_group_config() -> dict:
-	return {
-		"tz": DEFAULT_TZ,
-		"day_start": DEFAULT_DAY_START,
-		"day_end": DEFAULT_DAY_END,
-		"night_start": DEFAULT_NIGHT_START,
-		"night_end": DEFAULT_NIGHT_END,
-		"reminder_interval_min": DEFAULT_REMINDER_INTERVAL_MIN,
-		"lunch_start": DEFAULT_LUNCH_START,
-		"lunch_end": DEFAULT_LUNCH_END,
-	} 
+    return {
+        "tz": DEFAULT_TZ,
+        "day_start": DEFAULT_DAY_START,
+        "day_end": DEFAULT_DAY_END,
+        "night_start": DEFAULT_NIGHT_START,
+        "night_end": DEFAULT_NIGHT_END,
+        "reminder_interval_min": DEFAULT_REMINDER_INTERVAL_MIN,
+        "lunch_start": DEFAULT_LUNCH_START,
+        "lunch_end": DEFAULT_LUNCH_END,
+    }

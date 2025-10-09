@@ -1,87 +1,73 @@
 import asyncio
 import logging
-
+import os
 from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.types import BotCommand
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler
-
-from sqlalchemy.ext.asyncio import AsyncEngine
-
-from app.config import Settings
-from app.db.session import create_engine, create_session_maker
-from app.db.models import Base
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from app.handlers import commands_router, photos_router
-from app.scheduler import scheduler
-from app.middleware import FSMTimerMiddleware
+from app.database import init_db
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Bot configuration
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "7669076544:AAF7D9FSNqzclEos9AP3NSDyZ0U3fjUsDbk"
+OWNER_ID = int(os.getenv("OWNER_ID") or "6405212136")
+
+logger.info(f"Bot token: {BOT_TOKEN[:10]}...")
+logger.info(f"Owner ID: {OWNER_ID}")
+
+# Initialize bot and dispatcher
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+# Database configuration
+DATABASE_URL = "sqlite+aiosqlite:///./help_cleaners.db"
+engine = create_async_engine(DATABASE_URL, echo=False)
+
+# Include routers
+dp.include_router(commands_router)
+dp.include_router(photos_router)
 
 async def on_startup(bot: Bot, engine: AsyncEngine):
-	# Create tables and run lightweight migrations
-	async with engine.begin() as conn:
-		await conn.run_sync(Base.metadata.create_all)
-	from app.db.session import run_startup_migrations
-	await run_startup_migrations(engine)
+    """Bot startup handler"""
+    logger.info("Bot starting up...")
+    await init_db(engine)
+    logger.info("Database initialized")
+    logger.info("Bot startup completed!")
 
-	# Set bot commands
-	bot_commands = [
-		BotCommand(command="register", description="Зарегистрироваться как клинер"),
-		BotCommand(command="cleaners", description="Все клинеры"),
-		BotCommand(command="shift", description="Записаться на смену"),
-		BotCommand(command="today", description="Кто сегодня работает"),
-		BotCommand(command="myshifts", description="Мои смены"),
-		BotCommand(command="add_shift", description="➕ Добавить смену в табель"),
-		BotCommand(command="remove_shift", description="➖ Удалить смену из табеля"),
-		BotCommand(command="tabel", description="📋 Мой табель за 30 дней"),
-		BotCommand(command="duplicates", description="Список дубликатов фото"),
-		BotCommand(command="remove", description="Удалить клинера"),
-		BotCommand(command="reset", description="Сбросить состояние"),
-		BotCommand(command="help", description="Помощь"),
-		# 🔒 Команды безопасности (только для владельца)
-		BotCommand(command="addchat", description="Добавить группу (владелец)"),
-		BotCommand(command="removechat", description="Убрать группу (владелец)"),
-		BotCommand(command="listchats", description="Список групп (владелец)"),
-	]
-	await bot.set_my_commands(bot_commands)
-
+async def on_shutdown(bot: Bot, engine: AsyncEngine):
+    """Bot shutdown handler"""
+    logger.info("Bot shutting down...")
+    await engine.dispose()
+    logger.info("Bot shutdown completed!")
 
 async def main():
-	settings = Settings.from_env()
-
-	# Logging level
-	logging.basicConfig(level=logging.INFO)
-
-	engine = create_engine(settings)
-	SessionLocal = create_session_maker(engine)
-
-	bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-	dp = Dispatcher(storage=MemoryStorage())
-
-	# Provide session per-update via middleware
-	class SessionMiddleware:
-		def __init__(self, session_maker):
-			self._SessionLocal = session_maker
-
-		async def __call__(self, handler, event, data):
-			async with self._SessionLocal() as session:
-				data["session"] = session
-				return await handler(event, data)
-
-	# Attach session middleware globally
-	dp.update.middleware(SessionMiddleware(SessionLocal))
-	
-	# Attach FSM timer middleware
-	dp.update.middleware(FSMTimerMiddleware())
-
-	dp.include_router(commands_router)
-	dp.include_router(photos_router)
-
-	scheduler.start()
-	await on_startup(bot, engine)
-	await dp.start_polling(bot, polling_timeout=20)
-
+    """Main function"""
+    logger.info("Starting bot...")
+    
+    try:
+        # Startup
+        await on_startup(bot, engine)
+        
+        # Start polling
+        logger.info("Starting polling...")
+        await dp.start_polling(bot)
+        
+    except Exception as e:
+        logger.error(f"Error in main: {e}")
+        raise
+    finally:
+        # Shutdown
+        await on_shutdown(bot, engine)
 
 if __name__ == "__main__":
-	asyncio.run(main())
+    try:
+        logger.info("Bot main function started")
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Bot crashed: {e}")
+        raise
