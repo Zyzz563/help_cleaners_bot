@@ -1,0 +1,1 @@
+web: cd help_cleaners && python main.py

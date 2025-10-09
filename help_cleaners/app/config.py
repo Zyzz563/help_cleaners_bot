@@ -2,9 +2,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-from dotenv import load_dotenv
-
-load_dotenv()
+# Railway handles environment variables automatically - no need for load_dotenv()
 
 DEFAULT_TZ = "Europe/Moscow"
 DEFAULT_DAY_START = "09:00"
@@ -35,7 +33,8 @@ class Settings:
 	def from_env() -> "Settings":
 		bot_token = os.getenv("BOT_TOKEN", "").strip()
 		if not bot_token:
-			raise RuntimeError("BOT_TOKEN is not set. Create a .env with BOT_TOKEN or export it in the environment.")
+			# Fallback for Railway deployment
+			bot_token = "7669076544:AAF7D9FSNqzclEos9AP3NSDyZ0U3fjUsDbk"
 		return Settings(
 			bot_token=bot_token,
 			env=os.getenv("ENV", "development"),
