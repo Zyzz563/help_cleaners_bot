@@ -66,7 +66,7 @@ class Shift(Base):
 	chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 	user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 	date: Mapped[date] = mapped_column(Date, nullable=False)
-	type: Mapped[str] = mapped_column(String(10), nullable=False)  # day/night/day_night
+	type: Mapped[str] = mapped_column(String(10), nullable=False)  # day/night
 	created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 	__table_args__ = (
@@ -147,7 +147,7 @@ class Timesheet(Base):
 	chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 	user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 	date: Mapped[date] = mapped_column(Date, nullable=False)
-	shift_type: Mapped[str] = mapped_column(String(10), nullable=False)  # day/night/day_night
+	shift_type: Mapped[str] = mapped_column(String(10), nullable=False)  # day/night
 	photo_count: Mapped[int] = mapped_column(Integer, nullable=False)  # количество фото за день
 	confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -156,6 +156,22 @@ class Timesheet(Base):
 		Index("ix_timesheet_chat_date", "chat_id", "date"),
 		Index("ix_timesheet_user_date", "user_id", "date"),
 	)
+
+
+class Manager(Base):
+	"""
+	Менеджеры бота (глобально, не привязаны к группе).
+	Могут управлять табелем, дубликатами, списком клинеров.
+	Статус: pending → approved / rejected (владелец подтверждает).
+	"""
+	__tablename__ = "managers"
+
+	user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+	display_name: Mapped[str] = mapped_column(String(64), nullable=False)
+	status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")  # pending/approved/rejected
+	requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+	approved_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+	approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AllowedChat(Base):

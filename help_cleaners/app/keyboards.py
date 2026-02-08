@@ -3,8 +3,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 def day_night_kb() -> InlineKeyboardMarkup:
 	return InlineKeyboardMarkup(inline_keyboard=[
-		[InlineKeyboardButton(text="Дневная", callback_data="shift:day"), InlineKeyboardButton(text="Ночная", callback_data="shift:night")],
-		[InlineKeyboardButton(text="День+Ночь", callback_data="shift:day_night")]
+		[InlineKeyboardButton(text="🌅 Дневная", callback_data="shift:day"),
+		 InlineKeyboardButton(text="🌙 Ночная", callback_data="shift:night")]
 	])
 
 
@@ -18,7 +18,8 @@ def register_name_kb(username: str | None) -> InlineKeyboardMarkup:
 
 def gender_kb() -> InlineKeyboardMarkup:
 	return InlineKeyboardMarkup(inline_keyboard=[
-		[InlineKeyboardButton(text="Мужской", callback_data="gender:m"), InlineKeyboardButton(text="Женский", callback_data="gender:f")]
+		[InlineKeyboardButton(text="М", callback_data="gender:m"),
+		 InlineKeyboardButton(text="Ж", callback_data="gender:f")]
 	])
 
 
@@ -35,18 +36,17 @@ def remove_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
 
 
 def members_choice_kb(options: list[tuple[str, int]]) -> InlineKeyboardMarkup:
-	# options: [(display_name, user_id)]
 	keyboard = []
 	for name, uid in options:
 		keyboard.append([InlineKeyboardButton(text=name, callback_data=f"rmuser:{uid}")])
-	return InlineKeyboardMarkup(inline_keyboard=keyboard) 
+	return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 __all__ = [
 	"day_night_kb",
-	"register_name_kb", 
+	"register_name_kb",
 	"gender_kb",
 	"start_kb",
 	"remove_menu_kb",
 	"members_choice_kb",
-] 
+]

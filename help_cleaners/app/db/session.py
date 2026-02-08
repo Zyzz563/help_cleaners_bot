@@ -51,7 +51,10 @@ async def run_startup_migrations(engine: AsyncEngine) -> None:
 		# Очистка старых дубликатов (старше 30 дней)
 		from datetime import datetime, timedelta
 		thirty_days_ago = (datetime.now() - timedelta(days=30)).date()
-		await conn.exec_driver_sql("DELETE FROM photo_duplicates WHERE duplicate_date < ?", (thirty_days_ago,)) 
+		try:
+			await conn.exec_driver_sql("DELETE FROM photo_duplicates WHERE duplicate_date < ?", (thirty_days_ago,))
+		except Exception:
+			pass  # Таблица может не существовать при первом запуске
 		
 		# timesheets table for tracking confirmed work days
 		await conn.exec_driver_sql("""
@@ -113,6 +116,23 @@ async def run_startup_migrations(engine: AsyncEngine) -> None:
 			await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_timesheet_chat_date ON timesheets (chat_id, date)")
 			await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_timesheet_user_date ON timesheets (user_id, date)")
 		
+		# managers table
+		await conn.exec_driver_sql("""
+			CREATE TABLE IF NOT EXISTS managers (
+				user_id BIGINT PRIMARY KEY,
+				display_name VARCHAR(64) NOT NULL,
+				status VARCHAR(16) NOT NULL DEFAULT 'pending',
+				requested_at TIMESTAMP NOT NULL,
+				approved_by BIGINT NULL,
+				approved_at TIMESTAMP NULL
+			)
+		""")
+		# Pre-seed Наталья as approved manager
+		await conn.exec_driver_sql("""
+			INSERT OR IGNORE INTO managers (user_id, display_name, status, requested_at, approved_by, approved_at)
+			VALUES (1974868265, 'Наталья', 'approved', CURRENT_TIMESTAMP, 6405212136, CURRENT_TIMESTAMP)
+		""")
+
 		# Update shifts.type column size to support "day_night"
 		# SQLite doesn't support ALTER COLUMN, so we check if recreation is needed
 		res = await conn.exec_driver_sql("SELECT sql FROM sqlite_master WHERE type='table' AND name='shifts'")

@@ -18,8 +18,8 @@ from aiogram.types import InputMediaPhoto
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.config import MAX_NAME_LEN, default_group_config, OWNER_ID, ALLOWED_CHATS
-from app.db.models import Group, Member, Shift, Photo, PhotoDuplicate, ProcessedCallback, Timesheet, AllowedChat
-from app.db.session import create_session_maker
+from app.db.models import Group, Member, Shift, Photo, PhotoDuplicate, ProcessedCallback, Timesheet, AllowedChat, Manager
+# from app.db.session import create_session_maker  # unused after middleware refactor
 from app.keyboards import day_night_kb, register_name_kb, gender_kb, start_kb, remove_menu_kb, members_choice_kb
 from app.utils.text import is_valid_display_name
 from app.utils.time import parse_hhmm, local_today, local_now
@@ -29,7 +29,7 @@ router = Router()
 
 async def check_user_allowed(message: Message) -> bool:
 	"""
-	🔒 Проверяет разрешен ли пользователь для работы с ботом.
+	🔒 Проверяет разрешен ли пользователь для работы с ботом.у
 	Только владелец (OWNER_ID) может использовать команды.
 	"""
 	if not message.from_user:
@@ -51,22 +51,7 @@ async def check_chat_allowed(message: Message, session: AsyncSession) -> bool:
 		if message.from_user and message.from_user.id == OWNER_ID:
 			return True
 		else:
-			# Для личных сообщений показываем приветствие
-			await message.reply(
-				"👋 Привет! Я бот для управления клинерами.\n\n"
-				"🤖 **О боте:**\n"
-				"Я помогаю отслеживать работу клинеров, управлять сменами и обнаруживать дубликаты фотографий.\n\n"
-				"📋 **Основные функции:**\n"
-				"• Регистрация клинеров\n"
-				"• Управление сменами (дневные/ночные)\n"
-				"• Табель рабочих дней\n"
-				"• Обнаружение дубликатов фото\n"
-				"• Статистика работы\n\n"
-				"ℹ️ **Как использовать:**\n"
-				"Добавьте меня в группу и используйте команду /addchat для разрешения работы.\n\n"
-				"👨‍💻 **Создатель:** Азиз\n"
-				"📅 **Обновлено:** 2025"
-			)
+			await message.reply("Бот работает только в разрешённых группах.\n/help — справка")
 			return False
 	
 	# Сначала проверяем в конфигурации (для быстрого доступа)
@@ -167,41 +152,192 @@ class RegStates(StatesGroup):
 
 class TimesheetStates(StatesGroup):
 	"""Состояния для управления табелем"""
-	waiting_shift_date = State()  # Ожидание выбора даты смены
-	waiting_shift_type = State()  # Ожидание выбора типа смены
-	waiting_confirm = State()  # Ожидание подтверждения добавления
-	
-	# Для удаления смены
-	waiting_remove_date = State()  # Ожидание выбора даты для удаления
+	waiting_shift_date = State()
+	waiting_shift_type = State()
+	waiting_confirm = State()
+	waiting_remove_date = State()
+
+
+class ManagerRequestStates(StatesGroup):
+	"""Состояния для запроса роли менеджера"""
+	waiting_name = State()
+
+
+# ============ /manager_request — запрос роли менеджера ============
+
+@router.message(Command("manager_request"))
+async def cmd_manager_request(message: Message, session: AsyncSession, state: FSMContext):
+	"""Запрос на получение роли менеджера."""
+	user_id = message.from_user.id if message.from_user else 0
+	if user_id == OWNER_ID:
+		await message.reply("Вы владелец — у вас уже все права.")
+		return
+
+	# Уже менеджер?
+	existing = (await session.execute(
+		select(Manager).where(Manager.user_id == user_id)
+	)).scalar_one_or_none()
+
+	if existing:
+		if existing.status == "approved":
+			await message.reply("✅ Вы уже менеджер.")
+			return
+		elif existing.status == "pending":
+			await message.reply("⏳ Ваш запрос уже на рассмотрении у владельца.")
+			return
+		elif existing.status == "rejected":
+			# Разрешаем повторную заявку
+			await session.delete(existing)
+			await session.commit()
+
+	await message.reply("Введите ваше имя (для менеджерского профиля):")
+	await state.set_state(ManagerRequestStates.waiting_name)
+	asyncio.create_task(auto_delete_message(message, 3))
+
+
+@router.message(ManagerRequestStates.waiting_name)
+async def mgr_request_name(message: Message, session: AsyncSession, state: FSMContext):
+	"""Получили имя — сохраняем заявку, уведомляем владельца."""
+	name = (message.text or "").strip()
+	if not name or len(name) > 64:
+		await message.reply("Имя от 1 до 64 символов. Попробуйте ещё раз:")
+		return
+
+	user_id = message.from_user.id
+	mgr = Manager(
+		user_id=user_id,
+		display_name=name,
+		status="pending",
+		requested_at=datetime.utcnow(),
+	)
+	session.add(mgr)
+	await session.commit()
+	await state.clear()
+
+	await message.reply("⏳ Запрос отправлен владельцу. Ожидайте подтверждения.")
+
+	# Уведомляем владельца в ЛС
+	keyboard = InlineKeyboardBuilder()
+	keyboard.button(text="✅ Одобрить", callback_data=f"mgr_approve:{user_id}")
+	keyboard.button(text="❌ Отклонить", callback_data=f"mgr_reject:{user_id}")
+	keyboard.adjust(2)
+
+	try:
+		username = f"@{message.from_user.username}" if message.from_user.username else ""
+		await message.bot.send_message(
+			OWNER_ID,
+			f"📋 <b>Запрос на менеджера</b>\n\n"
+			f"👤 {name} {username}\n"
+			f"🆔 <code>{user_id}</code>\n\n"
+			f"Выдать права менеджера?",
+			parse_mode="HTML",
+			reply_markup=keyboard.as_markup(),
+		)
+	except Exception:
+		pass  # Владелец мог не начать диалог с ботом
+
+
+@router.callback_query(F.data.startswith("mgr_approve:"))
+async def cb_mgr_approve(callback: CallbackQuery, session: AsyncSession):
+	"""Владелец одобряет менеджера."""
+	if callback.from_user.id != OWNER_ID:
+		await callback.answer("❌ Только владелец", show_alert=True)
+		return
+
+	target_id = int(callback.data.split(":", 1)[1])
+	mgr = (await session.execute(
+		select(Manager).where(Manager.user_id == target_id)
+	)).scalar_one_or_none()
+
+	if not mgr:
+		await callback.answer("Заявка не найдена", show_alert=True)
+		return
+
+	mgr.status = "approved"
+	mgr.approved_by = OWNER_ID
+	mgr.approved_at = datetime.utcnow()
+	await session.commit()
+
+	await callback.message.edit_text(f"✅ {mgr.display_name} — менеджер!")
+	await callback.answer("Одобрено!")
+
+	# Уведомляем нового менеджера
+	try:
+		await callback.bot.send_message(
+			target_id,
+			"✅ Ваш запрос одобрен! Теперь вы менеджер.\n"
+			"Доступные команды: /add_shift, /remove_shift, /manager_list"
+		)
+	except Exception:
+		pass
+
+
+@router.callback_query(F.data.startswith("mgr_reject:"))
+async def cb_mgr_reject(callback: CallbackQuery, session: AsyncSession):
+	"""Владелец отклоняет заявку."""
+	if callback.from_user.id != OWNER_ID:
+		await callback.answer("❌ Только владелец", show_alert=True)
+		return
+
+	target_id = int(callback.data.split(":", 1)[1])
+	mgr = (await session.execute(
+		select(Manager).where(Manager.user_id == target_id)
+	)).scalar_one_or_none()
+
+	if not mgr:
+		await callback.answer("Заявка не найдена", show_alert=True)
+		return
+
+	mgr.status = "rejected"
+	await session.commit()
+
+	await callback.message.edit_text(f"❌ {mgr.display_name} — отклонено.")
+	await callback.answer("Отклонено")
+
+	try:
+		await callback.bot.send_message(target_id, "❌ Ваш запрос на роль менеджера отклонён.")
+	except Exception:
+		pass
+
+
+@router.message(Command("manager_list"))
+async def cmd_manager_list(message: Message, session: AsyncSession):
+	"""Список менеджеров — доступно менеджерам и владельцу."""
+	caller_id = message.from_user.id if message.from_user else 0
+	if not await is_manager_db(caller_id, session):
+		await message.reply("❌ Нет доступа.")
+		asyncio.create_task(auto_delete_message(message, 3))
+		return
+
+	managers = (await session.execute(
+		select(Manager).where(Manager.status == "approved").order_by(Manager.display_name)
+	)).scalars().all()
+
+	if not managers:
+		text = "Менеджеров нет (кроме владельца)."
+	else:
+		lines = [f"👤 {m.display_name} (ID: {m.user_id})" for m in managers]
+		text = "<b>Менеджеры:</b>\n" + "\n".join(lines)
+
+	# Добавляем владельца
+	text = f"👑 Владелец: {OWNER_ID}\n\n" + text
+
+	await message.reply(text, parse_mode="HTML")
+	asyncio.create_task(auto_delete_message(message, 3))
 
 
 @router.message(Command("start"))
-async def cmd_start(message: Message, session: AsyncSession):
+async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
 	"""
 	Команда /start - приветствие и информация о боте.
 	"""
-	# Если это личное сообщение - показываем приветствие
+	# Если это личное сообщение
 	if message.chat.type == "private":
 		await message.reply(
-			"👋 Привет! Я бот для управления клинерами.\n\n"
-			"🤖 **О боте:**\n"
-			"Я помогаю отслеживать работу клинеров, управлять сменами и обнаруживать дубликаты фотографий.\n\n"
-			"📋 **Основные функции:**\n"
-			"• Регистрация клинеров\n"
-			"• Управление сменами (дневные/ночные)\n"
-			"• Табель рабочих дней\n"
-			"• Обнаружение дубликатов фото\n"
-			"• Статистика работы\n\n"
-			"ℹ️ **Как использовать:**\n"
-			"Добавьте меня в группу и используйте команду /addchat для разрешения работы.\n\n"
-			"👨‍💻 **Создатель:** Азиз\n"
-			"📅 **Обновлено:** 2025\n\n"
-			"💡 **Доступные команды:**\n"
-			"/help - полный список команд\n"
-			"/register - регистрация клинера\n"
-			"/shift - записаться на смену\n"
-			"/tabel - мой табель\n"
-			"/duplicates - список дубликатов"
+			"👋 Привет! Я бот для клинеров.\n\n"
+			"Добавьте меня в группу и выполните /addchat.\n"
+			"Подробнее: /help",
+			parse_mode="HTML"
 		)
 		return
 	
@@ -209,7 +345,8 @@ async def cmd_start(message: Message, session: AsyncSession):
 	if not await check_chat_allowed(message, session):
 		return
 	
-	await message.reply("👋 Бот запущен! Используйте /help для списка команд.")
+	await message.reply(
+		"Я бот для клинеров. Для начала — зарегистрируйтесь:", reply_markup=start_kb(message.from_user.username if message.from_user else None))
 
 
 @router.message(Command("register"))
@@ -224,83 +361,150 @@ async def cmd_register(message: Message, session: AsyncSession, state: FSMContex
 
 	chat_id = message.chat.id
 	group = await ensure_group(session, chat_id, message.chat.title)
+	caller_id = message.from_user.id
+	caller_is_admin = await is_admin(chat_id, caller_id, message.bot) or caller_id == OWNER_ID
 
-	# Check if user is trying to register someone else (admin only)
-	args = message.text.split(maxsplit=1)
-	target_user_id = message.from_user.id
-	
-	if len(args) >= 2:
-		# Admin pattern: /register 123456789 — допускаем независимо от текущего состояния
-		if not await is_admin(chat_id, message.from_user.id, message.bot):
-			reply_msg = await message.reply("❌ Регистрировать других может только админ.")
-			data = await state.get_data()
-			messages_to_delete = data.get("messages_to_delete", [])
-			messages_to_delete.append(reply_msg)
-			await state.update_data(messages_to_delete=messages_to_delete)
+	args = (message.text or "").split(maxsplit=1)
+	target_user_id: Optional[int] = None
+	admin_mode = False
+
+	# ──────────────────────────────────────────────────
+	# 1. REPLY-TO-MESSAGE: ответ на сообщение пользователя
+	#    Самый надёжный способ зарегистрировать другого
+	# ──────────────────────────────────────────────────
+	if message.reply_to_message and message.reply_to_message.from_user:
+		replied_user = message.reply_to_message.from_user
+		if replied_user.is_bot:
+			await message.reply("❌ Нельзя зарегистрировать бота.")
+			asyncio.create_task(auto_delete_message(message, 3))
 			return
+		if replied_user.id != caller_id:
+			if not caller_is_admin:
+				await message.reply("❌ Регистрировать других может только админ.")
+				asyncio.create_task(auto_delete_message(message, 3))
+				return
+			target_user_id = replied_user.id
+			admin_mode = True
+
+	# ──────────────────────────────────────────────────
+	# 2. АРГУМЕНТ: /register <число_ID>
+	# ──────────────────────────────────────────────────
+	if target_user_id is None and len(args) >= 2:
+		arg = args[1].strip()
+
+		if not caller_is_admin:
+			await message.reply("❌ Регистрировать других может только админ.")
+			asyncio.create_task(auto_delete_message(message, 3))
+			return
+
+		# Пробуем числовой ID
 		try:
-			target_user_id = int(args[1])
-			# Check if user exists in chat
+			parsed_id = int(arg)
+		except ValueError:
+			parsed_id = None
+
+		if parsed_id is not None:
+			# Проверяем — это свой ID?
+			if parsed_id == caller_id:
+				await message.reply(
+					f"⚠️ ID {parsed_id} — это ваш собственный аккаунт!\n\n"
+					f"Ваш Telegram ID: {caller_id}\n\n"
+					f"💡 Чтобы зарегистрировать другого участника:\n"
+					f"→ Ответьте на любое сообщение этого участника командой /register"
+				)
+				asyncio.create_task(auto_delete_message(message, 3))
+				return
+			target_user_id = parsed_id
+			admin_mode = True
+		else:
+			# Не число — @username или что-то другое
+			await message.reply(
+				f"❌ «{arg}» — не числовой ID.\n\n"
+				f"💡 Самый простой способ зарегистрировать другого участника:\n"
+				f"→ Ответьте на любое его сообщение командой /register\n\n"
+				f"Или узнайте его числовой ID через @userinfobot"
+			)
+			asyncio.create_task(auto_delete_message(message, 3))
+			return
+
+	# ──────────────────────────────────────────────────
+	# 3. ADMIN MODE: валидация и запуск регистрации
+	# ──────────────────────────────────────────────────
+	if admin_mode and target_user_id is not None:
+		# Проверяем что пользователь в группе
+		try:
 			chat_member = await message.bot.get_chat_member(chat_id, target_user_id)
 			if chat_member.status in ['left', 'kicked']:
-				reply_msg = await message.reply("❌ Указанный пользователь не находится в группе.")
-				data = await state.get_data()
-				messages_to_delete = data.get("messages_to_delete", [])
-				messages_to_delete.append(reply_msg)
-				await state.update_data(messages_to_delete=messages_to_delete)
+				await message.reply("❌ Этот пользователь не находится в группе.")
+				asyncio.create_task(auto_delete_message(message, 3))
 				return
-		except (ValueError, Exception):
-			reply_msg = await message.reply("❌ Неверный формат ID. Используйте: /register 123456789")
-			data = await state.get_data()
-			messages_to_delete = data.get("messages_to_delete", [])
-			messages_to_delete.append(reply_msg)
-			await state.update_data(messages_to_delete=messages_to_delete)
+			# Имя для отображения
+			if chat_member.user.username:
+				target_name = f"@{chat_member.user.username}"
+			elif chat_member.user.first_name:
+				target_name = chat_member.user.first_name
+			else:
+				target_name = f"ID:{target_user_id}"
+		except Exception:
+			await message.reply("❌ Не удалось найти пользователя. Проверьте ID.")
+			asyncio.create_task(auto_delete_message(message, 3))
 			return
-		# Check if target user is already registered
+
+		# Уже зарегистрирован?
 		existing_target = await session.get(Member, {"chat_id": chat_id, "user_id": target_user_id})
 		if existing_target:
-			reply_msg = await message.reply(f"Пользователь {existing_target.display_name} уже зарегистрирован в этой группе.")
-			data = await state.get_data()
-			messages_to_delete = data.get("messages_to_delete", [])
-			messages_to_delete.append(reply_msg)
-			await state.update_data(messages_to_delete=messages_to_delete)
+			await message.reply(f"ℹ️ {target_name} уже зарегистрирован как «{existing_target.display_name}».")
+			asyncio.create_task(auto_delete_message(message, 3))
 			return
-		# Start registration for target user
+
+		# Начинаем регистрацию
+		await state.clear()  # Сброс любого предыдущего состояния
 		await state.update_data(target_user_id=target_user_id)
-		reply_msg = await message.reply(f"Регистрирую пользователя ID:{target_user_id}. Введите его имя (1..{MAX_NAME_LEN} символов):")
+		reply_msg = await message.reply(
+			f"👤 Регистрирую: {target_name} (ID: {target_user_id})\n"
+			f"Введите имя для этого пользователя (1..{MAX_NAME_LEN} символов):"
+		)
 		await state.set_state(RegStates.waiting_name)
 		await state.update_data(messages_to_delete=[message, reply_msg])
 		return
 
-	# Anti-duplication for self-registration only
+	# ──────────────────────────────────────────────────
+	# 4. /register без аргументов
+	# ──────────────────────────────────────────────────
+
+	# Если уже в процессе
 	st = await state.get_state()
 	if st == RegStates.waiting_gender.state:
-		reply_msg = await message.reply("Вы уже в процессе регистрации: выберите пол на предыдущем сообщении или отправьте /reset, чтобы начать заново.")
-		data = await state.get_data()
-		messages_to_delete = data.get("messages_to_delete", [])
-		messages_to_delete.append(reply_msg)
-		await state.update_data(messages_to_delete=messages_to_delete)
+		await message.reply("Вы уже в процессе: выберите пол выше или /reset")
 		return
 	if st == RegStates.waiting_name.state:
-		reply_msg = await message.reply(f"Регистрация уже начата: введите имя (1..{MAX_NAME_LEN} символов) или отправьте /reset, чтобы начать заново.")
-		data = await state.get_data()
-		messages_to_delete = data.get("messages_to_delete", [])
-		messages_to_delete.append(reply_msg)
-		await state.update_data(messages_to_delete=messages_to_delete)
+		await message.reply(f"Регистрация идёт: введите имя (1..{MAX_NAME_LEN}) или /reset")
 		return
 
-	# Self-registration flow
+	# Уже зарегистрирован?
+	existing_self = await session.get(Member, {"chat_id": chat_id, "user_id": caller_id})
+	if existing_self:
+		if caller_is_admin:
+			# Админ уже зарегистрирован — показываем подсказку
+			await message.reply(
+				f"✅ Вы зарегистрированы как «{existing_self.display_name}».\n\n"
+				f"👑 Чтобы зарегистрировать другого участника:\n"
+				f"→ Ответьте на его сообщение командой /register"
+			)
+		else:
+			await message.reply(f"✅ Вы уже зарегистрированы как «{existing_self.display_name}».")
+		asyncio.create_task(auto_delete_message(message, 3))
+		return
+
+	# Саморегистрация
+	await state.clear()
 	if message.from_user.username:
-		kb = register_name_kb(message.from_user.username if message.from_user else None)
+		kb = register_name_kb(message.from_user.username)
 		reply = await message.reply(f"Отправьте имя/ник (1..{MAX_NAME_LEN} символов) или нажмите кнопку", reply_markup=kb)
-		await state.set_state(RegStates.waiting_name)
-		await state.update_data(messages_to_delete=[message, reply])
-		return
-
-	# Без username предлагаем вручную ввести имя, не завершаем регистрацию автоматически
-	reply = await message.reply(f"Отправьте имя/ник (1..{MAX_NAME_LEN} символов)")
+	else:
+		reply = await message.reply(f"Отправьте имя/ник (1..{MAX_NAME_LEN} символов)")
 	await state.set_state(RegStates.waiting_name)
-	await state.update_data(messages_to_delete=[message, reply])
+	await state.update_data(target_user_id=caller_id, messages_to_delete=[message, reply])
 
 
 @router.message(StateFilter(RegStates.waiting_name), F.text)
@@ -554,9 +758,7 @@ async def cmd_shift(message: Message, session: AsyncSession):
 	# 🔒 Проверяем разрешен ли чат
 	if not await check_chat_allowed(message, session):
 		return
-	
 	if message.chat.type not in {"group", "supergroup"}:
-		await message.reply("Команда доступна только в группе.")
 		return
 
 	chat_id = message.chat.id
@@ -564,87 +766,34 @@ async def cmd_shift(message: Message, session: AsyncSession):
 	group = await ensure_group(session, chat_id, message.chat.title)
 	today = local_today(group.tz)
 
-	args = (message.text or "").split()
-	# Usage: /shift [YYYY-MM-DD] [day|night|day_night]
-	shift_date = today
-	shift_type: Optional[str] = None
-	if len(args) >= 2:
-		try:
-			shift_date = date.fromisoformat(args[1])
-		except Exception:
-			shift_date = today
-	if len(args) >= 3 and args[2] in {"day", "night", "day_night"}:
-		shift_type = args[2]
+	# Проверяем есть ли уже смена сегодня
+	existing_shift = await session.execute(
+		select(Shift).where(Shift.chat_id == chat_id, Shift.user_id == user_id, Shift.date == today)
+	)
+	current_shift = existing_shift.scalar_one_or_none()
 
-	if shift_type is None:
-		# Проверяем есть ли уже смена сегодня для умной клавиатуры
-		existing_shift = await session.execute(
-			select(Shift).where(Shift.chat_id == chat_id, Shift.user_id == user_id, Shift.date == shift_date)
-		)
-		current_shift = existing_shift.scalar_one_or_none()
-		
-		if current_shift:
-			if current_shift.type == "day":
-				# Уже есть дневная - предлагаем ночную или комбо
-				await message.reply(f"У вас уже есть дневная смена на {shift_date.strftime('%d.%m')}.\nВыберите продолжение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-					[InlineKeyboardButton(text="Только ночная", callback_data="shift:night")],
-					[InlineKeyboardButton(text="День+Ночь", callback_data="shift:day_night")]
-				]))
-			elif current_shift.type == "night":
-				# Уже есть ночная - предлагаем дневную или комбо  
-				# Ночная смена записана на следующий день, показываем правильную дату
-				from datetime import timedelta
-				night_shift_date = shift_date + timedelta(days=1)
-				await message.reply(f"У вас уже есть ночная смена на {night_shift_date.strftime('%d.%m')}.\nВыберите продолжение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-					[InlineKeyboardButton(text="Только дневная", callback_data="shift:day")],
-					[InlineKeyboardButton(text="День+Ночь", callback_data="shift:day_night")]
-				]))
-			else:
-				# Уже комбо - просто стандартная клавиатура
-				await message.reply("Выберите смену:", reply_markup=day_night_kb())
-		else:
-			# Нет смены - стандартная клавиатура
-			await message.reply("Выберите смену:", reply_markup=day_night_kb())
-	else:
-		# shift_type задан явно через аргумент команды
-		if shift_type == "day_night":
-			# Создаем дневную смену на сегодня
-			await _upsert_shift(session, chat_id, user_id, shift_date, "day")
-			await schedule_reminders_for_shift(chat_id, shift_date, "day", session)
-			
-			# Создаем ночную смену на СЕГОДНЯ (дата начала)
-			from datetime import timedelta
-			next_day = shift_date + timedelta(days=1)
-			await _upsert_shift(session, chat_id, user_id, shift_date, "night")
-			await schedule_reminders_for_shift(chat_id, shift_date, "night", session)
-			
-			reply = await message.reply(f"✅ Комбо смена записана:\n🌅 Дневная: {shift_date.strftime('%d.%m')}\n🌙 Ночная: {next_day.strftime('%d.%m')}")
-		elif shift_type == "night":
-			# 🌙 Ночная смена: записываем на дату НАЧАЛА (сегодня)
-			from datetime import timedelta
-			next_day = shift_date + timedelta(days=1)
-			await _upsert_shift(session, chat_id, user_id, shift_date, "night")
-			await schedule_reminders_for_shift(chat_id, shift_date, "night", session)
-			
-			reply = await message.reply(f"✅ Ночная смена записана: {next_day.strftime('%d.%m')}")
-		else:
-			# 🌅 Дневная смена: с 09:00 до 21:00 - записываем на текущий день
-			await _upsert_shift(session, chat_id, user_id, shift_date, shift_type)
-			await schedule_reminders_for_shift(chat_id, shift_date, shift_type, session)
-			
-			shift_name = {"day": "дневная"}[shift_type]
-			reply = await message.reply(f"✅ Смена записана: {shift_name} {shift_date.strftime('%d.%m')}")
-			
-			asyncio.create_task(_autodelete(message, reply))
+	if current_shift:
+		shift_names = {"day": "🌅 дневная", "night": "🌙 ночная"}
+		name = shift_names.get(current_shift.type, current_shift.type)
+		await message.reply(f"У вас уже есть {name} смена на {today.strftime('%d.%m')}.")
+		asyncio.create_task(auto_delete_message(message, 3))
+		return
+
+	await message.reply("Выберите смену:", reply_markup=day_night_kb())
+	asyncio.create_task(auto_delete_message(message, 3))
 
 
 @router.callback_query(F.data.startswith("shift:"))
 async def cb_shift(callback: CallbackQuery, session: AsyncSession):
 	shift_type = callback.data.split(":", 1)[1]
+	if shift_type not in ("day", "night"):
+		await callback.answer("❌ Неизвестный тип смены", show_alert=True)
+		return
+
 	chat_id = callback.message.chat.id
 	user_id = callback.from_user.id
 
-	# Idempotency: skip if this callback id was already processed
+	# Idempotency
 	cb_id = f"{callback.id}"
 	existing = await session.get(ProcessedCallback, cb_id)
 	if existing:
@@ -653,99 +802,30 @@ async def cb_shift(callback: CallbackQuery, session: AsyncSession):
 
 	group = await ensure_group(session, chat_id, callback.message.chat.title)
 	shift_date = local_today(group.tz)
-	now = local_now(group.tz)
-	current_time = now.time()
-	
-	# Проверяем есть ли уже смена у пользователя на эту дату
-	existing_shift = await session.execute(
-		select(Shift).where(
-			Shift.chat_id == chat_id,
-			Shift.user_id == user_id,
-			Shift.date == shift_date
-		)
-	)
-	existing_shift = existing_shift.scalar_one_or_none()
-	
-	# Если уже есть смена, предупреждаем
-	if existing_shift:
-		shift_names = {
-			"day": "дневная",
-			"night": "ночная", 
-			"day_night": "комбо (день+ночь)"
-		}
-		shift_name = shift_names.get(existing_shift.type, existing_shift.type)
-		await callback.answer(f"⚠️ У вас уже выбрана {shift_name} смена на {shift_date.strftime('%d.%m')}!", show_alert=True)
-		return
-	
-	# Проверяем время для выбора смены
-	from datetime import time as dt_time
-	
-	if shift_type == "day":
-		# Дневная смена: можно выбрать только до 21:00
-		if current_time >= dt_time(21, 0):
-			await callback.answer("❌ Дневную смену нельзя выбрать после 21:00! Дневная смена работает с 09:00 до 21:00.", show_alert=True)
-			return
-			
-	elif shift_type == "night":
-		# Ночная смена: можно выбрать с 21:00 до 09:00 следующего дня
-		if current_time < dt_time(21, 0) and current_time >= dt_time(9, 0):
-			await callback.answer("❌ Ночную смену нельзя выбрать с 09:00 до 21:00! Ночная смена работает с 21:00 до 09:00.", show_alert=True)
-			return
-			
-	elif shift_type == "day_night":
-		# Комбо смена: можно выбрать с 09:00 до 21:00 (чтобы успеть дневную часть)
-		if current_time < dt_time(9, 0) or current_time >= dt_time(21, 0):
-			await callback.answer("❌ Комбо смену нельзя выбрать с 21:00 до 09:00! Дневная часть работает с 09:00 до 21:00.", show_alert=True)
-			return
 
-	if shift_type == "day_night":
-		# Создаем дневную смену на сегодня
-		await _upsert_shift(session, chat_id, user_id, shift_date, "day")
-		await schedule_reminders_for_shift(chat_id, shift_date, "day", session)
-		
-		# Создаем ночную смену на СЕГОДНЯ (дата начала), а не на следующий день
-		from datetime import timedelta
-		next_day = shift_date + timedelta(days=1)
-		await _upsert_shift(session, chat_id, user_id, shift_date, "night")  # <- дата НАЧАЛА
-		await schedule_reminders_for_shift(chat_id, shift_date, "night", session)
-		
-		# Отправляем подтверждение и удаляем кнопки
+	# Уже есть смена?
+	existing_shift = await session.execute(
+		select(Shift).where(Shift.chat_id == chat_id, Shift.user_id == user_id, Shift.date == shift_date)
+	)
+	if existing_shift.scalar_one_or_none():
+		await callback.answer("⚠️ У вас уже есть смена на сегодня!", show_alert=True)
+		return
+
+	# Записываем смену — ВСЕГДА на сегодняшнюю дату
+	# Дневная: 09:00-21:00 того же дня
+	# Ночная:  21:00-09:00 (начало в этот день, конец на следующий)
+	# В табеле и БД — дата НАЧАЛА смены
+	await _upsert_shift(session, chat_id, user_id, shift_date, shift_type)
+
+	if shift_type == "day":
 		await callback.message.edit_text(
-			f"✅ **Комбо смена записана!**\n\n"
-			f"🌅 **Дневная:** {shift_date.strftime('%d.%m')} (09:00-21:00)\n"
-			f"🌙 **Ночная:** {next_day.strftime('%d.%m')} (21:00-09:00)\n\n"
-			f"📸 Отправляйте фото во время смены для записи в табель!"
-		)
-	elif shift_type == "night":
-		# 🌙 Ночная смена: с 21:00 до 09:00 - записываем на дату НАЧАЛА (сегодня)
-		from datetime import timedelta
-		next_day = shift_date + timedelta(days=1)
-		
-		# ВАЖНО: записываем смену на дату НАЧАЛА (shift_date), а не конца!
-		await _upsert_shift(session, chat_id, user_id, shift_date, "night")
-		await schedule_reminders_for_shift(chat_id, shift_date, "night", session)
-		
-		# Отправляем подтверждение и удаляем кнопки (показываем дату ОКОНЧАНИЯ для пользователя)
-		await callback.message.edit_text(
-			f"✅ **Ночная смена записана!**\n\n"
-			f"🌙 **Дата в табеле:** {next_day.strftime('%d.%m')}\n"
-			f"⏰ **Время:** {shift_date.strftime('%d.%m')} 21:00 - {next_day.strftime('%d.%m')} 09:00\n\n"
-			f"📸 Отправляйте фото во время смены для записи в табель!"
+			f"✅ Дневная смена: {shift_date.strftime('%d.%m')} (09:00–21:00)"
 		)
 	else:
-		# 🌅 Дневная смена: с 09:00 до 21:00 - записываем на текущий день
-		await _upsert_shift(session, chat_id, user_id, shift_date, shift_type)
-	
-	await schedule_reminders_for_shift(chat_id, shift_date, shift_type, session)
-	
-	# Отправляем подтверждение и удаляем кнопки
-	await callback.message.edit_text(
-		f"✅ **Дневная смена записана!**\n\n"
-		f"🌅 **Дата:** {shift_date.strftime('%d.%m')}\n"
-		f"⏰ **Время:** 09:00 - 21:00\n\n"
-		f"📸 Отправляйте фото во время смены для записи в табель!"
-	)
-	
+		await callback.message.edit_text(
+			f"✅ Ночная смена: {shift_date.strftime('%d.%m')} (21:00–09:00)"
+		)
+
 	# mark processed
 	session.add(ProcessedCallback(id=cb_id, created_at=datetime.utcnow()))
 	await session.commit()
@@ -757,90 +837,47 @@ async def cmd_today(message: Message, session: AsyncSession):
 	# 🔒 Проверяем разрешен ли чат
 	if not await check_chat_allowed(message, session):
 		return
-	
 	if message.chat.type not in {"group", "supergroup"}:
-		await message.reply("Команда доступна только в группе.")
 		return
 
 	chat_id = message.chat.id
 	group = await ensure_group(session, chat_id, message.chat.title)
 	today = local_today(group.tz)
 
-	# Получаем смены на сегодня
-	q_today = (
+	# Все смены на сегодня (и день, и ночь записаны на одну дату)
+	q = (
 		select(Shift.type, Member.display_name, Member.user_id)
 		.join(Member, (Member.chat_id == Shift.chat_id) & (Member.user_id == Shift.user_id))
 		.where(Shift.chat_id == chat_id, Shift.date == today)
 		.order_by(Shift.type, Member.display_name)
 	)
-	rows_today = (await session.execute(q_today)).all()
-	
-	# Получаем ночные смены на завтра (чтобы найти комбо смены)
-	from datetime import timedelta
-	tomorrow = today + timedelta(days=1)
-	q_tomorrow = (
-		select(Shift.type, Member.display_name, Member.user_id)
-		.join(Member, (Member.chat_id == Shift.chat_id) & (Member.user_id == Shift.user_id))
-		.where(Shift.chat_id == chat_id, Shift.date == tomorrow, Shift.type == "night")
-		.order_by(Member.display_name)
-	)
-	rows_tomorrow = (await session.execute(q_tomorrow)).all()
-	
-	if not rows_today and not rows_tomorrow:
+	rows = (await session.execute(q)).all()
+
+	if not rows:
 		reply = await message.reply("Сегодня смен нет.")
-		asyncio.create_task(_autodelete(message, reply))
+		asyncio.create_task(auto_delete_message(message, 3))
+		asyncio.create_task(auto_delete_message(reply, 15))
 		return
-	
+
 	def mention(uid: int, name: str) -> str:
 		return f"<a href=\"tg://user?id={uid}\">{name}</a>"
-	
-	# Группируем по пользователям для определения комбо смен
-	user_shifts = {}
-	
-	# Обрабатываем сегодняшние смены
-	for shift_type, name, uid in rows_today:
-		if uid not in user_shifts:
-			user_shifts[uid] = {"name": name, "types": []}
-		user_shifts[uid]["types"].append(shift_type)
-	
-	# Обрабатываем завтрашние ночные смены (для комбо)
-	for shift_type, name, uid in rows_tomorrow:
-		if uid not in user_shifts:
-			user_shifts[uid] = {"name": name, "types": []}
-		user_shifts[uid]["types"].append("night_tomorrow")
-	
-	# Формируем вывод
+
 	day_names = []
 	night_names = []
-	combo_names = []
-	
-	for uid, data in user_shifts.items():
-		types = data["types"]
-		name = data["name"]
-		mention_text = mention(uid, name)
-		
-		if "day" in types and "night_tomorrow" in types:
-			# Комбо смена: день сегодня + ночь завтра
-			combo_names.append(mention_text)
-		elif "day" in types:
-			# Только дневная
-			day_names.append(mention_text)
-		elif "night" in types:
-			# Только ночная сегодня
-			night_names.append(mention_text)
-		elif "night_tomorrow" in types:
-			# Только ночная завтра (начинается сегодня в 21:00)
-			night_names.append(mention_text)
-	
-	text = ""
+	for shift_type, name, uid in rows:
+		m = mention(uid, name)
+		if shift_type == "day":
+			day_names.append(m)
+		elif shift_type == "night":
+			night_names.append(m)
+
+	parts = []
 	if day_names:
-		text += "🌅 День: " + ", ".join(day_names) + "\n"
+		parts.append("🌅 День: " + ", ".join(day_names))
 	if night_names:
-		text += "🌙 Ночь: " + ", ".join(night_names) + "\n"
-	if combo_names:
-		text += "🌅 День/🌙 Ночь: " + ", ".join(combo_names)
-		
-	reply = await message.reply(text.strip(), parse_mode="HTML")
+		parts.append("🌙 Ночь: " + ", ".join(night_names))
+
+	await message.reply("\n".join(parts), parse_mode="HTML")
 	asyncio.create_task(auto_delete_message(message, 3))
 
 
@@ -860,18 +897,7 @@ async def on_bot_added(event: ChatMemberUpdated, session: AsyncSession):
 	await session.commit()
 
 
-@router.message(Command("start"))
-async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
-	# 🔒 Проверяем разрешен ли чат
-	if not await check_chat_allowed(message, session):
-		return
-	
-	if message.chat.type in {"group", "supergroup"}:
-		reply = await message.reply(
-			"Я бот для клинеров. Для начала — зарегистрируйтесь:", reply_markup=start_kb(message.from_user.username if message.from_user else None))
-		asyncio.create_task(_autodelete(message, reply))
-	else:
-		await message.answer("Добавьте меня в рабочую группу и используйте команды там: /register, /shift, /today.")
+## Second /start handler removed — merged into the first cmd_start above
 
 
 @router.callback_query(F.data == "start:register", StateFilter(None))
@@ -887,126 +913,62 @@ async def cb_start_register(callback: CallbackQuery, state: FSMContext):
 
 @router.message(Command("help"))
 async def cmd_help(message: Message, session: AsyncSession):
-	# Если это личное сообщение - показываем справку без проверки чата
-	if message.chat.type == "private":
-		await message.reply(
-			"🤖 **HELP CLEANERS | KZN**\n\n"
-			"**О боте:**\n"
-			"Этот бот создан для автоматизации работы клининговых бригад. "
-			"Он помогает вести учет смен, отслеживать дубликаты фотографий, "
-			"вести табель и управлять персоналом.\n\n"
-			
-			"**📋 Основные функции:**\n"
-			"• Регистрация клинеров в группе\n"
-			"• Управление сменами (дневные/ночные/комбо)\n"
-			"• Автоматическое ведение табеля\n"
-			"• Детекция дубликатов фотографий\n"
-			"• Система напоминаний о сменах\n\n"
-			
-			"**🔧 Доступные команды:**\n\n"
-			"**👤 Регистрация и управление:**\n"
-			"• 📝 /register — регистрация в группе\n"
-			"• 👥 /cleaners — список всех клинеров\n\n"
-			
-			"**⏰ Смены и табель:**\n"
-			"• 🕐 /shift — установить смену (день/ночь/комбо)\n"
-			"• 📅 /today — кто сегодня на смене\n"
-			"• 📊 /tabel — мой табель за 30 дней\n"
-			"• 📋 /myshifts — мои смены\n\n"
-			
-			"**📸 Фотографии:**\n"
-			"• Отправляйте фото для подтверждения работы\n"
-			"• Автоматическое обнаружение дубликатов\n"
-			"• 🔍 /duplicates — список дубликатов за 30 дней\n\n"
-			
-			"**🔒 Команды владельца:**\n"
-			"• ➕ /addchat — добавить группу в разрешенные\n"
-			"• ➖ /removechat — убрать группу из разрешенных\n"
-			"• 📋 /listchats — список разрешенных групп\n\n"
-			
-			"**ℹ️ Дополнительно:**\n"
-			"• ❓ /help — эта справка\n"
-			"• 🔄 /reset — сброс состояния регистрации\n\n"
-			
-			"**💡 Как это работает:**\n"
-			"1. Зарегистрируйтесь командой 📝 /register\n"
-			"2. Установите смену командой 🕐 /shift\n"
-			"3. Отправляйте фото во время работы\n"
-			"4. Бот автоматически ведет табель\n"
-			"5. Проверяйте прогресс командой 📊 /tabel\n\n"
-			
-			"**👨‍💻 Создатель:** Азиз\n"
-			"**🔐 Версия:** 2.0\n"
-			"**📅 Обновлено:** 2025\n\n"
-			
-			"*Нажмите на любую команду выше, чтобы выполнить её!*",
-			parse_mode="Markdown"
+	caller_id = message.from_user.id if message.from_user else 0
+	caller_is_manager = await is_manager_db(caller_id, session)
+	caller_is_owner = caller_id == OWNER_ID
+
+	# Базовые команды — для всех
+	text = (
+		"🤖 <b>CleaningBot for the Spirit</b>\n\n"
+		"<b>Клинер:</b>\n"
+		"/register — регистрация\n"
+		"/shift — выбрать смену\n"
+		"/today — кто на смене\n"
+		"/myshifts — мои смены\n"
+		"/tabel — мой табель\n"
+		"/help — справка\n"
+	)
+
+	# Менеджерские команды
+	if caller_is_manager:
+		text += (
+			"\n<b>Менеджер:</b>\n"
+			"/add_shift — добавить смену в табель\n"
+			"/remove_shift — удалить смену\n"
+			"/cleaners — список клинеров\n"
+			"/duplicates — дубликаты фото\n"
+			"/manager_list — список менеджеров\n"
 		)
+
+	# Команды владельца
+	if caller_is_owner:
+		text += (
+			"\n<b>Владелец:</b>\n"
+			"/addchat — разрешить группу\n"
+			"/removechat — убрать группу\n"
+			"/listchats — список групп\n"
+		)
+
+	# Для не-менеджеров — как стать менеджером
+	if not caller_is_manager:
+		text += "\n/manager_request — запрос роли менеджера\n"
+
+	text += (
+		"\n<b>Смены:</b>\n"
+		"🌅 Дневная: 09:00–21:00\n"
+		"🌙 Ночная: 21:00–09:00\n\n"
+		"<i>Разработчик | Aziz [Devzis]</i>"
+	)
+
+	if message.chat.type == "private":
+		await message.reply(text, parse_mode="HTML")
 		return
-	
-	# 🔒 Проверяем разрешен ли чат для групп
+
 	if not await check_chat_allowed(message, session):
 		return
-	
-	text = (
-		"🤖 **HELP CLEANERS | KZN**\n\n"
-		"**О боте:**\n"
-		"Этот бот создан для автоматизации работы клининговых бригад. "
-		"Он помогает вести учет смен, отслеживать дубликаты фотографий, "
-		"вести табель и управлять персоналом.\n\n"
-		
-		"**📋 Основные функции:**\n"
-		"• Регистрация клинеров в группе\n"
-		"• Управление сменами (дневные/ночные/комбо)\n"
-		"• Автоматическое ведение табеля\n"
-		"• Детекция дубликатов фотографий\n"
-		"• Система напоминаний о сменах\n\n"
-		
-		"**🔧 Доступные команды:**\n\n"
-		"**👤 Регистрация и управление:**\n"
-		"• 📝 /register — регистрация в группе\n"
-		"• 👥 /cleaners — список всех клинеров\n\n"
-		
-		"**⏰ Смены и табель:**\n"
-		"• 🕐 /shift — установить смену (день/ночь/комбо)\n"
-		"• 📅 /today — кто сегодня на смене\n"
-		"• 📊 /tabel — мой табель за 30 дней\n"
-		"• 📋 /myshifts — мои смены\n\n"
-		
-		"**📸 Фотографии:**\n"
-		"• Отправляйте фото для подтверждения работы\n"
-		"• Автоматическое обнаружение дубликатов\n"
-		"• 🔍 /duplicates — список дубликатов за 30 дней\n\n"
-		
-		"**🔒 Команды владельца:**\n"
-		"• ➕ /addchat — добавить группу в разрешенные\n"
-		"• ➖ /removechat — убрать группу из разрешенных\n"
-		"• 📋 /listchats — список разрешенных групп\n\n"
-		
-		"**ℹ️ Дополнительно:**\n"
-		"• ❓ /help — эта справка\n"
-		"• 🔄 /reset — сброс состояния регистрации\n\n"
-		
-		"**💡 Как это работает:**\n"
-		"1. Зарегистрируйтесь командой 📝 /register\n"
-		"2. Установите смену командой 🕐 /shift\n"
-		"3. Отправляйте фото во время работы\n"
-		"4. Бот автоматически ведет табель\n"
-		"5. Проверяйте прогресс командой 📊 /tabel\n\n"
-		
-		"**👨‍💻 Создатель:** Азиз\n"
-		"**🔐 Версия:** 2.0\n"
-		"**📅 Обновлено:** 2025\n\n"
-		
-		"*Нажмите на любую команду выше, чтобы выполнить её!*"
-	)
-	
-	if message.chat.type in {"group", "supergroup"}:
-		reply = await message.reply(text, parse_mode="Markdown")
-		# Удаляем только команду пользователя, справку оставляем
-		asyncio.create_task(auto_delete_message(message, 3))
-	else:
-		await message.answer(text, parse_mode="Markdown")
+
+	await message.reply(text, parse_mode="HTML")
+	asyncio.create_task(auto_delete_message(message, 3))
 
 
 @router.message(Command("addchat"))
@@ -1136,14 +1098,9 @@ async def cmd_listchats(message: Message, session: AsyncSession):
 		await message.reply("❌ У вас нет прав для этой команды.")
 		return
 	
-	from aiogram import Bot
 	from app.config import ALLOWED_CHATS
-	# Получаем токен из settings (как в main.py)
-	import os
-	from dotenv import load_dotenv
-	load_dotenv()
-	bot_token = os.getenv("BOT_TOKEN", "").strip()
-	bot = Bot(token=bot_token)
+	# Используем бота из контекста сообщения
+	bot = message.bot
 	
 	# Получаем список разрешенных групп из БД
 	allowed_chats = await session.execute(
@@ -1301,13 +1258,7 @@ async def cb_remove_chat(callback: CallbackQuery, session: AsyncSession):
 		
 		# Пытаемся выйти из группы
 		try:
-			from aiogram import Bot
-			import os
-			from dotenv import load_dotenv
-			load_dotenv()
-			bot_token = os.getenv("BOT_TOKEN", "").strip()
-			bot = Bot(token=bot_token)
-			await bot.leave_chat(chat_id)
+			await callback.bot.leave_chat(chat_id)
 		except Exception:
 			pass  # Группа может быть уже недоступна
 	else:
@@ -1333,17 +1284,15 @@ async def cmd_myshifts(message: Message, session: AsyncSession):
 	rows = (await session.execute(q)).all()
 	if not rows:
 		reply = await message.reply("Смен не найдено.")
-		asyncio.create_task(_autodelete(message, reply))
+		asyncio.create_task(auto_delete_message(message, 3))
+		asyncio.create_task(auto_delete_message(reply, 10))
 		return
-	
-	# Формируем текст с человеческими названиями смен
-	shift_names = {"day": "🌅 дневная", "night": "🌙 ночная"}
+
+	shift_names = {"day": "🌅 день", "night": "🌙 ночь"}
 	text = "Ваши смены (посл. 30):\n" + "\n".join(
-		f"{d.strftime('%d.%m.%Y')} — {shift_names.get(t, t)}" for d, t in rows
+		f"{d.strftime('%d.%m')} — {shift_names.get(t, t)}" for d, t in rows
 	)
-	reply = await message.reply(text)
-	asyncio.create_task(_autodelete(message, reply))
-	# Удаляем команду пользователя
+	await message.reply(text)
 	asyncio.create_task(auto_delete_message(message, 3))
 
 
@@ -1373,9 +1322,7 @@ async def cmd_cleaners(message: Message, session: AsyncSession):
 	def mention(uid: int, name: str) -> str:
 		return f"<a href=\"tg://user?id={uid}\">{name}</a>"
 	text = "Клинеры:\n" + "\n".join(f"{gender_mark(g)} — {mention(uid, name)}" for name, g, uid in rows)
-	reply = await message.reply(text, parse_mode="HTML")
-	asyncio.create_task(_autodelete(message, reply))
-	# Удаляем команду пользователя
+	await message.reply(text, parse_mode="HTML")
 	asyncio.create_task(auto_delete_message(message, 3))
 
 
@@ -1390,37 +1337,93 @@ async def cmd_duplicates(message: Message, session: AsyncSession):
 		return
 
 	chat_id = message.chat.id
+	caller_id = message.from_user.id if message.from_user else 0
 	group = await ensure_group(session, chat_id, message.chat.title)
 	today = local_today(group.tz)
 
-	# Get duplicates from last 30 days
-	from datetime import timedelta
+	# ──────────────────────────────────────────────────
+	# Определяем целевого пользователя (если указан)
+	# ──────────────────────────────────────────────────
+	target_user_id: Optional[int] = None
+	target_name: Optional[str] = None
+
+	# 1. Reply-to-message
+	if message.reply_to_message and message.reply_to_message.from_user:
+		if await is_admin(chat_id, caller_id, message.bot) or caller_id == OWNER_ID:
+			replied = message.reply_to_message.from_user
+			if not replied.is_bot:
+				target_user_id = replied.id
+				target_name = replied.username or replied.first_name or f"ID:{replied.id}"
+
+	# 2. Аргумент: /duplicates <user_id>
+	args = (message.text or "").split(maxsplit=1)
+	if target_user_id is None and len(args) >= 2:
+		if await is_admin(chat_id, caller_id, message.bot) or caller_id == OWNER_ID:
+			arg = args[1].strip()
+			try:
+				target_user_id = int(arg)
+				try:
+					cm = await message.bot.get_chat_member(chat_id, target_user_id)
+					target_name = cm.user.username or cm.user.first_name or f"ID:{target_user_id}"
+				except Exception:
+					target_name = f"ID:{target_user_id}"
+			except ValueError:
+				# Может быть @username — пробуем найти в нашей БД
+				clean = arg.lstrip("@").lower()
+				# Ищем среди зарегистрированных участников
+				members_result = await session.execute(
+					select(Member).where(Member.chat_id == chat_id)
+				)
+				for m in members_result.scalars().all():
+					try:
+						cm = await message.bot.get_chat_member(chat_id, m.user_id)
+						if cm.user.username and cm.user.username.lower() == clean:
+							target_user_id = m.user_id
+							target_name = f"@{cm.user.username}"
+							break
+					except Exception:
+						continue
+				if target_user_id is None:
+					await message.reply(
+						"❌ Не удалось найти пользователя.\n"
+						"Используйте: /duplicates <числовой_ID>\n"
+						"Или ответьте на сообщение пользователя командой /duplicates"
+					)
+					asyncio.create_task(auto_delete_message(message, 3))
+					return
+
+	# ──────────────────────────────────────────────────
+	# РЕЖИМ: Анализ конкретного пользователя
+	# ──────────────────────────────────────────────────
+	if target_user_id is not None:
+		await _duplicates_for_user(message, session, chat_id, target_user_id, target_name or f"ID:{target_user_id}", group)
+		return
+
+	# ──────────────────────────────────────────────────
+	# РЕЖИМ: Общий список дубликатов группы (30 дней)
+	# ──────────────────────────────────────────────────
 	thirty_days_ago = today - timedelta(days=30)
 	
-	# Получаем дубликаты с информацией об оригинале и дубликате
 	rows = await session.execute(
 		select(PhotoDuplicate, Photo)
 		.join(Photo, PhotoDuplicate.duplicate_photo_id == Photo.id)
 		.where(PhotoDuplicate.chat_id == chat_id, PhotoDuplicate.duplicate_date >= thirty_days_ago)
 		.order_by(PhotoDuplicate.created_at.desc())
-		.limit(50)  # Limit to prevent spam
+		.limit(50)
 	)
 	rows = rows.all()
 
 	if not rows:
-		reply = await message.reply("Дубликатов не найдено.")
+		reply = await message.reply("✅ Дубликатов не найдено за последние 30 дней.")
 		asyncio.create_task(auto_delete_message(message, 3))
 		return
 	
-	# Формируем читаемый список дубликатов
 	lines = []
-	lines.append("Дубликаты за 30 дней\n")
+	lines.append("📊 <b>Дубликаты за 30 дней</b>\n")
 	
 	for i, (dup, dup_photo) in enumerate(rows, 1):
-		# Получаем информацию о пользователях
 		dup_user = await session.get(Member, {"chat_id": chat_id, "user_id": dup_photo.user_id})
 		
-		# Получаем оригинальное фото отдельно
 		orig_photo_result = await session.execute(
 			select(Photo).where(Photo.id == dup.original_photo_id)
 		)
@@ -1428,34 +1431,199 @@ async def cmd_duplicates(message: Message, session: AsyncSession):
 		
 		if orig_photo:
 			orig_user = await session.get(Member, {"chat_id": chat_id, "user_id": orig_photo.user_id})
-			orig_name = orig_user.display_name if orig_user else f"ID:{orig_photo.user_id}"
+			orig_name_str = orig_user.display_name if orig_user else f"ID:{orig_photo.user_id}"
 		else:
-			orig_name = "Неизвестно"
+			orig_name_str = "Неизвестно"
 		
-		dup_name = dup_user.display_name if dup_user else f"ID:{dup_photo.user_id}"
+		dup_name_str = dup_user.display_name if dup_user else f"ID:{dup_photo.user_id}"
 		
-		# Создаем ссылки на пользователей
-		orig_link = f"[{orig_name}](tg://user?id={orig_photo.user_id})" if orig_photo else orig_name
-		dup_link = f"[{dup_name}](tg://user?id={dup_photo.user_id})"
+		orig_link = f"<a href=\"tg://user?id={orig_photo.user_id}\">{orig_name_str}</a>" if orig_photo else orig_name_str
+		dup_link = f"<a href=\"tg://user?id={dup_photo.user_id}\">{dup_name_str}</a>"
 		
-		# Сначала оригинал, потом дубликат
-		lines.append(f"{i}. Оригинал: {orig_link}")
-		lines.append(f"   {dup.original_date.strftime('%d.%m')} {str(dup.original_time)[:8]}")
+		lines.append(f"<b>{i}.</b> Оригинал: {orig_link}")
+		lines.append(f"   📅 {dup.original_date.strftime('%d.%m.%Y')} ⏰ {str(dup.original_time)[:5]}")
 		lines.append(f"   Дубликат: {dup_link}")
-		lines.append(f"   {dup.duplicate_date.strftime('%d.%m')} {str(dup.duplicate_time)[:8]}")
+		lines.append(f"   📅 {dup.duplicate_date.strftime('%d.%m.%Y')} ⏰ {str(dup.duplicate_time)[:5]}")
 		lines.append("")
 	
-	# Отправляем сообщение с форматированием
 	response_text = "\n".join(lines)
 	if len(response_text) > 4096:
-		# Разбиваем на части если слишком длинное
 		parts = [response_text[i:i+4096] for i in range(0, len(response_text), 4096)]
 		for i, part in enumerate(parts):
-			await message.reply(f"Часть {i+1}/{len(parts)}:\n{part}", parse_mode="Markdown")
+			await message.reply(f"Часть {i+1}/{len(parts)}:\n{part}", parse_mode="HTML")
 	else:
-		await message.reply(response_text, parse_mode="Markdown")
+		await message.reply(response_text, parse_mode="HTML")
 	
-	# Удаляем команду пользователя
+	asyncio.create_task(auto_delete_message(message, 3))
+
+
+async def _duplicates_for_user(
+	message: Message, session: AsyncSession,
+	chat_id: int, user_id: int, user_display: str, group
+):
+	"""
+	Полный анализ дубликатов конкретного пользователя.
+	Проверяет ВСЕ фото пользователя за всё время.
+	"""
+	processing = await message.reply(f"⏳ Запускаю полный анализ дубликатов для {user_display}...")
+
+	# 1. Все фото этого пользователя в группе
+	user_photos_result = await session.execute(
+		select(Photo)
+		.where(Photo.chat_id == chat_id, Photo.user_id == user_id)
+		.order_by(Photo.date.asc(), Photo.time.asc())
+	)
+	user_photos = user_photos_result.scalars().all()
+
+	if not user_photos:
+		await processing.edit_text(f"📊 Анализ для {user_display}: фотографий не найдено.")
+		asyncio.create_task(auto_delete_message(message, 3))
+		return
+
+	# 2. Получаем ВСЕ уникальные file_unique_id этого пользователя
+	user_unique_ids = {p.file_unique_id for p in user_photos}
+
+	# 3. Ищем ВСЕ фото в группе с такими же file_unique_id (включая чужие)
+	all_matching_result = await session.execute(
+		select(Photo)
+		.where(Photo.chat_id == chat_id, Photo.file_unique_id.in_(user_unique_ids))
+		.order_by(Photo.date.asc(), Photo.time.asc())
+	)
+	all_matching = all_matching_result.scalars().all()
+
+	# 4. Группируем по file_unique_id
+	groups_by_uid: dict[str, list] = {}
+	for photo in all_matching:
+		fuid = photo.file_unique_id
+		if fuid not in groups_by_uid:
+			groups_by_uid[fuid] = []
+		groups_by_uid[fuid].append(photo)
+
+	# 5. Находим дубликаты — группы с >1 фото
+	duplicates_found = []
+	for fuid, photos in groups_by_uid.items():
+		if len(photos) > 1:
+			# Сортируем: первое = оригинал, остальные = дубликаты
+			photos.sort(key=lambda p: (p.date, p.time))
+			original = photos[0]
+			for dup in photos[1:]:
+				# Нас интересуют только случаи, где ЭТОТ пользователь замешан
+				if dup.user_id == user_id or original.user_id == user_id:
+					duplicates_found.append((original, dup))
+
+	# 6. Также проверяем записи в таблице photo_duplicates
+	db_dups_result = await session.execute(
+		select(PhotoDuplicate)
+		.where(
+			PhotoDuplicate.chat_id == chat_id,
+			(PhotoDuplicate.duplicate_photo_id.in_(
+				select(Photo.id).where(Photo.chat_id == chat_id, Photo.user_id == user_id)
+			)) | (PhotoDuplicate.original_photo_id.in_(
+				select(Photo.id).where(Photo.chat_id == chat_id, Photo.user_id == user_id)
+			))
+		)
+		.order_by(PhotoDuplicate.created_at.desc())
+	)
+	db_dups = db_dups_result.scalars().all()
+
+	# 7. Формируем отчёт
+	total_photos = len(user_photos)
+	total_unique = len(user_unique_ids)
+	total_duplicates = len(duplicates_found)
+
+	lines = []
+	lines.append(f"📊 <b>АНАЛИЗ ДУБЛИКАТОВ</b>")
+	lines.append(f"👤 Пользователь: <b>{user_display}</b>")
+	lines.append(f"")
+	lines.append(f"📈 <b>Статистика:</b>")
+	lines.append(f"• Всего фото отправлено: {total_photos}")
+	lines.append(f"• Уникальных фото: {total_unique}")
+	lines.append(f"• Дубликатов найдено: {total_duplicates}")
+	if total_photos > 0:
+		dup_percent = round(total_duplicates / total_photos * 100, 1)
+		lines.append(f"• Процент дубликатов: {dup_percent}%")
+	lines.append("")
+
+	if not duplicates_found:
+		lines.append("✅ <b>Дубликатов не обнаружено!</b>")
+	else:
+		lines.append("─────────────────────")
+		lines.append("")
+
+		# Группируем по датам для наглядности
+		by_date: dict[str, list] = {}
+		for orig, dup in duplicates_found:
+			date_key = dup.date.strftime('%d.%m.%Y')
+			if date_key not in by_date:
+				by_date[date_key] = []
+			by_date[date_key].append((orig, dup))
+
+		for date_str in sorted(by_date.keys(), reverse=True):
+			items = by_date[date_str]
+			lines.append(f"📅 <b>{date_str}</b> — {len(items)} дубликат(ов)")
+			for idx, (orig, dup) in enumerate(items, 1):
+				# Информация об оригинале
+				orig_member = await session.get(Member, {"chat_id": chat_id, "user_id": orig.user_id})
+				orig_name = orig_member.display_name if orig_member else f"ID:{orig.user_id}"
+				
+				dup_member = await session.get(Member, {"chat_id": chat_id, "user_id": dup.user_id})
+				dup_name = dup_member.display_name if dup_member else f"ID:{dup.user_id}"
+
+				# Время между оригиналом и дубликатом
+				orig_dt = datetime.combine(orig.date, orig.time.replace(tzinfo=None) if hasattr(orig.time, 'replace') else orig.time)
+				dup_dt = datetime.combine(dup.date, dup.time.replace(tzinfo=None) if hasattr(dup.time, 'replace') else dup.time)
+				diff = abs(dup_dt - orig_dt)
+				if diff.days > 0:
+					diff_str = f"{diff.days} дн."
+				elif diff.seconds >= 3600:
+					diff_str = f"{diff.seconds // 3600} ч."
+				elif diff.seconds >= 60:
+					diff_str = f"{diff.seconds // 60} мин."
+				else:
+					diff_str = f"{diff.seconds} сек."
+
+				is_forwarded = "📤 Пересланное" if dup.is_forwarded else ""
+				same_user = orig.user_id == dup.user_id
+
+				if same_user:
+					lines.append(
+						f"  {idx}. Свой дубликат {is_forwarded}"
+					)
+					lines.append(
+						f"     Оригинал: {orig.date.strftime('%d.%m')} {str(orig.time)[:5]}"
+					)
+					lines.append(
+						f"     Повтор:   {dup.date.strftime('%d.%m')} {str(dup.time)[:5]} (через {diff_str})"
+					)
+				else:
+					orig_link = f"<a href=\"tg://user?id={orig.user_id}\">{orig_name}</a>"
+					dup_link = f"<a href=\"tg://user?id={dup.user_id}\">{dup_name}</a>"
+					lines.append(
+						f"  {idx}. Чужое фото скопировано {is_forwarded}"
+					)
+					lines.append(
+						f"     Оригинал ({orig_link}): {orig.date.strftime('%d.%m')} {str(orig.time)[:5]}"
+					)
+					lines.append(
+						f"     Копия ({dup_link}): {dup.date.strftime('%d.%m')} {str(dup.time)[:5]} (через {diff_str})"
+					)
+			lines.append("")
+
+	response_text = "\n".join(lines)
+
+	# Отправляем результат
+	try:
+		await processing.delete()
+	except Exception:
+		pass
+
+	if len(response_text) > 4096:
+		parts = [response_text[i:i+4096] for i in range(0, len(response_text), 4096)]
+		for i, part in enumerate(parts):
+			await message.reply(f"Часть {i+1}/{len(parts)}:\n{part}", parse_mode="HTML")
+	else:
+		await message.reply(response_text, parse_mode="HTML")
+
 	asyncio.create_task(auto_delete_message(message, 3))
 
 
@@ -1779,406 +1947,370 @@ async def _upsert_shift(session: AsyncSession, chat_id: int, user_id: int, shift
 	await session.commit()
 
 
-async def _autodelete(src: Message, reply: Message, delay: int = 15) -> None:
-	try:
-		await asyncio.sleep(delay)
-		await reply.delete()
-		await src.delete()
-	except Exception:
-		return 
 
 
-# ==================== НОВЫЕ КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ ТАБЕЛЕМ ====================
+# ==================== УПРАВЛЕНИЕ ТАБЕЛЕМ (ТОЛЬКО МЕНЕДЖЕРЫ) ====================
+
+
+async def is_manager_db(user_id: int, session: AsyncSession) -> bool:
+	"""Проверяет, является ли пользователь менеджером (из БД) или владельцем."""
+	if user_id == OWNER_ID:
+		return True
+	mgr = (await session.execute(
+		select(Manager).where(Manager.user_id == user_id, Manager.status == "approved")
+	)).scalar_one_or_none()
+	return mgr is not None
+
 
 @router.message(Command("add_shift"))
 async def cmd_add_shift(message: Message, session: AsyncSession, state: FSMContext):
 	"""
-	Команда для добавления смены в табель вручную.
-	Клинер выбирает дату и тип смены через кнопки.
+	Добавление смены в табель — только для менеджеров.
+	Менеджер выбирает сотрудника → дату → тип смены.
 	"""
-	# 🔒 Проверяем разрешен ли чат
 	if not await check_chat_allowed(message, session):
 		return
-	
 	if message.chat.type not in {"group", "supergroup"}:
-		await message.reply("Команда доступна только в группе.")
+		return
+
+	caller_id = message.from_user.id if message.from_user else 0
+	if not await is_manager_db(caller_id, session):
+		reply = await message.reply("❌ Только менеджеры могут заполнять табель.")
+		asyncio.create_task(auto_delete_message(message, 3))
+		asyncio.create_task(auto_delete_message(reply, 10))
 		return
 
 	chat_id = message.chat.id
-	user_id = message.from_user.id if message.from_user else 0
-	
-	# Проверяем регистрацию
-	member = await session.get(Member, {"chat_id": chat_id, "user_id": user_id})
-	if not member:
-		reply = await message.reply("❌ Зарегистрируйтесь: /register")
-		asyncio.create_task(auto_delete_message(message, 5))
+
+	# Показываем список зарегистрированных сотрудников
+	members = (await session.execute(
+		select(Member).where(Member.chat_id == chat_id).order_by(Member.display_name)
+	)).scalars().all()
+
+	if not members:
+		reply = await message.reply("❌ Нет зарегистрированных клинеров.")
+		asyncio.create_task(auto_delete_message(message, 3))
 		asyncio.create_task(auto_delete_message(reply, 10))
 		return
-	
-	group = await ensure_group(session, chat_id, message.chat.title)
-	today = local_today(group.tz)
-	
-	# Создаем кнопки для текущего месяца (с 1 числа до конца месяца)
+
 	keyboard = InlineKeyboardBuilder()
-	
-	# Первый день текущего месяца
+	for m in members:
+		keyboard.button(text=m.display_name, callback_data=f"addshift_user:{m.user_id}")
+	keyboard.adjust(2)
+
+	await message.reply("📋 Выберите сотрудника:", reply_markup=keyboard.as_markup())
+	await state.set_state(TimesheetStates.waiting_shift_date)
+	asyncio.create_task(auto_delete_message(message, 3))
+
+
+@router.callback_query(F.data.startswith("addshift_user:"))
+async def cb_addshift_user(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+	"""Менеджер выбрал сотрудника → показываем календарь дат."""
+	if not await is_manager_db(callback.from_user.id, session):
+		await callback.answer("❌ Нет доступа", show_alert=True)
+		return
+
+	target_user_id = int(callback.data.split(":", 1)[1])
+	chat_id = callback.message.chat.id
+
+	# Запоминаем ID сотрудника
+	await state.update_data(target_user_id=target_user_id)
+
+	# Имя сотрудника
+	member = await session.get(Member, {"chat_id": chat_id, "user_id": target_user_id})
+	member_name = member.display_name if member else str(target_user_id)
+
+	group = await ensure_group(session, chat_id, callback.message.chat.title)
+	today = local_today(group.tz)
+
+	# Кнопки для дней текущего месяца
 	first_day = today.replace(day=1)
-	
-	# Последний день текущего месяца
 	if today.month == 12:
 		last_day = today.replace(day=31)
 	else:
 		next_month = today.replace(month=today.month + 1, day=1)
 		last_day = next_month - timedelta(days=1)
-	
-	# Генерируем кнопки для всех дней месяца
+
+	keyboard = InlineKeyboardBuilder()
 	current_date = first_day
 	while current_date <= last_day:
-		date_str = current_date.strftime("%d.%m")
-		
-		# Подсветка сегодняшнего дня
-		if current_date == today:
-			button_text = f"📅 Сегодня"
-		else:
-			button_text = f"📆 {date_str}"
-		
-		keyboard.button(text=button_text, callback_data=f"addshift_date:{current_date.isoformat()}")
+		label = "📅 Сегодня" if current_date == today else current_date.strftime("%d.%m")
+		keyboard.button(text=label, callback_data=f"addshift_date:{current_date.isoformat()}")
 		current_date += timedelta(days=1)
-	
-	keyboard.adjust(3)  # 3 кнопки в ряд
-	
-	reply = await message.reply(
-		"📋 Добавление смены в табель\n\n"
-		"Выберите дату смены:",
+	keyboard.adjust(4)
+
+	await callback.message.edit_text(
+		f"📋 Табель: {member_name}\nВыберите дату:",
 		reply_markup=keyboard.as_markup()
 	)
-	
-	await state.set_state(TimesheetStates.waiting_shift_date)
-	asyncio.create_task(auto_delete_message(message, 3))
+	await callback.answer()
 
 
 @router.callback_query(F.data.startswith("addshift_date:"))
 async def cb_addshift_date(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-	"""Обработка выбора даты для добавления смены"""
-	shift_date_str = callback.data.split(":", 1)[1]
-	shift_date = date.fromisoformat(shift_date_str)
-	
+	"""Менеджер выбрал дату → выбор типа смены."""
+	if not await is_manager_db(callback.from_user.id, session):
+		await callback.answer("❌ Нет доступа", show_alert=True)
+		return
+
+	shift_date = date.fromisoformat(callback.data.split(":", 1)[1])
 	chat_id = callback.message.chat.id
-	user_id = callback.from_user.id
-	
-	# Сохраняем дату в состояние
+	data = await state.get_data()
+	target_user_id = data.get("target_user_id")
+
+	if not target_user_id:
+		await callback.answer("❌ Сотрудник не выбран", show_alert=True)
+		await state.clear()
+		return
+
 	await state.update_data(shift_date=shift_date)
-	
-	# Проверяем, есть ли уже смена на эту дату
-	existing_timesheet = await session.execute(
+
+	# Проверяем, есть ли уже запись в табеле
+	existing = (await session.execute(
 		select(Timesheet).where(
 			Timesheet.chat_id == chat_id,
-			Timesheet.user_id == user_id,
+			Timesheet.user_id == target_user_id,
 			Timesheet.date == shift_date
 		)
-	)
-	existing_shifts = existing_timesheet.scalars().all()
-	
-	if existing_shifts:
-		shift_types = [s.shift_type for s in existing_shifts]
-		shift_names = {
-			"day": "дневная",
-			"night": "ночная"
-		}
-		existing_names = [shift_names.get(t, t) for t in shift_types]
-		
-		await callback.answer(
-			f"⚠️ У вас уже есть смена на {shift_date.strftime('%d.%m.%Y')}: {', '.join(existing_names)}",
-			show_alert=True
-		)
+	)).scalars().all()
+
+	if existing:
+		names = [("🌅 день" if s.shift_type == "day" else "🌙 ночь") for s in existing]
+		await callback.answer(f"⚠️ Уже есть: {', '.join(names)} на {shift_date.strftime('%d.%m')}", show_alert=True)
 		return
-	
-	# Создаем кнопки для выбора типа смены
+
 	keyboard = InlineKeyboardBuilder()
-	keyboard.button(text="🌅 Дневная (09:00-21:00)", callback_data="addshift_type:day")
-	keyboard.button(text="🌙 Ночная (21:00-09:00)", callback_data="addshift_type:night")
-	keyboard.adjust(1)  # По одной кнопке в ряд
-	
+	keyboard.button(text="🌅 Дневная", callback_data="addshift_type:day")
+	keyboard.button(text="🌙 Ночная", callback_data="addshift_type:night")
+	keyboard.adjust(2)
+
 	await callback.message.edit_text(
-		f"📋 Добавление смены\n\n"
-		f"📅 Дата: {shift_date.strftime('%d.%m.%Y')}\n\n"
-		f"Выберите тип смены:",
+		f"📅 {shift_date.strftime('%d.%m.%Y')}\nВыберите тип смены:",
 		reply_markup=keyboard.as_markup()
 	)
-	
 	await state.set_state(TimesheetStates.waiting_shift_type)
 	await callback.answer()
 
 
 @router.callback_query(F.data.startswith("addshift_type:"))
 async def cb_addshift_type(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-	"""Обработка выбора типа смены"""
+	"""Менеджер выбрал тип → подтверждение."""
+	if not await is_manager_db(callback.from_user.id, session):
+		await callback.answer("❌ Нет доступа", show_alert=True)
+		return
+
 	shift_type = callback.data.split(":", 1)[1]
-	
-	chat_id = callback.message.chat.id
-	user_id = callback.from_user.id
-	
-	# Получаем дату из состояния
 	data = await state.get_data()
 	shift_date = data.get("shift_date")
-	
-	if not shift_date:
-		await callback.answer("❌ Ошибка: дата не выбрана", show_alert=True)
+	target_user_id = data.get("target_user_id")
+
+	if not shift_date or not target_user_id:
+		await callback.answer("❌ Данные потеряны", show_alert=True)
 		await state.clear()
 		return
-	
-	shift_names = {
-		"day": "дневная",
-		"night": "ночная"
-	}
-	shift_name = shift_names.get(shift_type, shift_type)
-	
-	# Создаем кнопки подтверждения
+
+	await state.update_data(shift_type=shift_type)
+
+	member = await session.get(Member, {"chat_id": callback.message.chat.id, "user_id": target_user_id})
+	member_name = member.display_name if member else str(target_user_id)
+	shift_label = "🌅 дневная" if shift_type == "day" else "🌙 ночная"
+
 	keyboard = InlineKeyboardBuilder()
-	keyboard.button(text="✅ Да, добавить", callback_data="addshift_confirm:yes")
+	keyboard.button(text="✅ Добавить", callback_data="addshift_confirm:yes")
 	keyboard.button(text="❌ Отмена", callback_data="addshift_confirm:no")
 	keyboard.adjust(2)
-	
-	# Сохраняем тип смены в состояние
-	await state.update_data(shift_type=shift_type)
-	
+
 	await callback.message.edit_text(
-		f"📋 Подтверждение добавления\n\n"
-		f"📅 Дата: {shift_date.strftime('%d.%m.%Y')}\n"
-		f"⏰ Смена: {shift_name}\n\n"
-		f"Добавить эту смену в табель?",
+		f"📋 Подтверждение\n\n"
+		f"👤 {member_name}\n"
+		f"📅 {shift_date.strftime('%d.%m.%Y')}\n"
+		f"⏰ {shift_label}\n\n"
+		f"Добавить в табель?",
 		reply_markup=keyboard.as_markup()
 	)
-	
 	await state.set_state(TimesheetStates.waiting_confirm)
 	await callback.answer()
 
 
 @router.callback_query(F.data.startswith("addshift_confirm:"))
 async def cb_addshift_confirm(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-	"""Подтверждение добавления смены в табель"""
+	"""Подтверждение добавления смены в табель."""
 	confirm = callback.data.split(":", 1)[1]
-	
+
 	if confirm == "no":
-		await callback.message.edit_text("❌ Добавление смены отменено.")
+		await callback.message.edit_text("❌ Отменено.")
 		await state.clear()
 		await callback.answer()
 		return
-	
-	chat_id = callback.message.chat.id
-	user_id = callback.from_user.id
-	
-	# Получаем данные из состояния
+
 	data = await state.get_data()
 	shift_date = data.get("shift_date")
 	shift_type = data.get("shift_type")
-	
-	if not shift_date or not shift_type:
-		await callback.answer("❌ Ошибка: данные не найдены", show_alert=True)
+	target_user_id = data.get("target_user_id")
+	chat_id = callback.message.chat.id
+
+	if not shift_date or not shift_type or not target_user_id:
+		await callback.answer("❌ Данные потеряны", show_alert=True)
 		await state.clear()
 		return
-	
-	# Добавляем смену в табель
-	new_timesheet = Timesheet(
+
+	new_ts = Timesheet(
 		chat_id=chat_id,
-		user_id=user_id,
+		user_id=target_user_id,
 		date=shift_date,
 		shift_type=shift_type,
-		photo_count=0,  # Фото не учитываются, так как управление ручное
+		photo_count=0,
 		confirmed_at=datetime.utcnow()
 	)
-	session.add(new_timesheet)
+	session.add(new_ts)
 	await session.commit()
-	
-	shift_names = {
-		"day": "дневная",
-		"night": "ночная"
-	}
-	shift_name = shift_names.get(shift_type, shift_type)
-	
-	await callback.message.edit_text(
-		f"✅ Смена добавлена!\n\n"
-		f"📅 {shift_date.strftime('%d.%m.%Y')} — {shift_name}"
-	)
-	
-	# Удаляем сообщение через 10 секунд
-	asyncio.create_task(auto_delete_message(callback.message, 10))
-	
+
+	member = await session.get(Member, {"chat_id": chat_id, "user_id": target_user_id})
+	member_name = member.display_name if member else str(target_user_id)
+	shift_label = "🌅 день" if shift_type == "day" else "🌙 ночь"
+
+	await callback.message.edit_text(f"✅ {member_name} — {shift_date.strftime('%d.%m')} {shift_label}")
 	await state.clear()
 	await callback.answer("✅ Добавлено!")
 
 
 @router.message(Command("remove_shift"))
 async def cmd_remove_shift(message: Message, session: AsyncSession, state: FSMContext):
-	"""
-	Команда для удаления смены из табеля.
-	"""
-	# 🔒 Проверяем разрешен ли чат
+	"""Удаление смены из табеля — только для менеджеров."""
 	if not await check_chat_allowed(message, session):
 		return
-	
 	if message.chat.type not in {"group", "supergroup"}:
-		await message.reply("Команда доступна только в группе.")
+		return
+
+	caller_id = message.from_user.id if message.from_user else 0
+	if not await is_manager_db(caller_id, session):
+		reply = await message.reply("❌ Только менеджеры могут удалять смены из табеля.")
+		asyncio.create_task(auto_delete_message(message, 3))
+		asyncio.create_task(auto_delete_message(reply, 10))
 		return
 
 	chat_id = message.chat.id
-	user_id = message.from_user.id if message.from_user else 0
-	
-	# Проверяем регистрацию
-	member = await session.get(Member, {"chat_id": chat_id, "user_id": user_id})
-	if not member:
-		reply = await message.reply("❌ Зарегистрируйтесь: /register")
-		asyncio.create_task(auto_delete_message(message, 5))
+
+	# Список сотрудников
+	members = (await session.execute(
+		select(Member).where(Member.chat_id == chat_id).order_by(Member.display_name)
+	)).scalars().all()
+
+	if not members:
+		reply = await message.reply("❌ Нет зарегистрированных клинеров.")
+		asyncio.create_task(auto_delete_message(message, 3))
 		asyncio.create_task(auto_delete_message(reply, 10))
 		return
-	
-	# Получаем все смены пользователя
-	timesheets_result = await session.execute(
-		select(Timesheet).where(
-			Timesheet.chat_id == chat_id,
-			Timesheet.user_id == user_id
-		).order_by(Timesheet.date.desc())
-	)
-	timesheets = timesheets_result.scalars().all()
-	
-	if not timesheets:
-		reply = await message.reply("❌ Смен в табеле нет.")
-		asyncio.create_task(auto_delete_message(message, 5))
-		asyncio.create_task(auto_delete_message(reply, 10))
-		return
-	
-	# Группируем смены по датам для красивого отображения
-	shifts_by_date = {}
-	for ts in timesheets:
-		date_key = ts.date
-		if date_key not in shifts_by_date:
-			shifts_by_date[date_key] = []
-		shifts_by_date[date_key].append(ts)
-	
-	# Создаем кнопки для каждой даты и типа смены
+
 	keyboard = InlineKeyboardBuilder()
-	
-	shift_names = {
-		"day": "🌅 Дневная",
-		"night": "🌙 Ночная"
-	}
-	
-	for work_date in sorted(shifts_by_date.keys(), reverse=True):
-		for ts in shifts_by_date[work_date]:
-			date_str = ts.date.strftime("%d.%m.%Y")
-			shift_name = shift_names.get(ts.shift_type, ts.shift_type)
-			button_text = f"{date_str} — {shift_name}"
-			
-			keyboard.button(
-				text=button_text,
-				callback_data=f"removeshift:{ts.id}"
-			)
-	
-	keyboard.adjust(1)  # По одной кнопке в ряд
-	
-	reply = await message.reply(
-		"🗑️ Удаление смены из табеля\n\n"
-		"Выберите смену для удаления:",
-		reply_markup=keyboard.as_markup()
-	)
-	
+	for m in members:
+		keyboard.button(text=m.display_name, callback_data=f"rmshift_user:{m.user_id}")
+	keyboard.adjust(2)
+
+	await message.reply("🗑 Выберите сотрудника:", reply_markup=keyboard.as_markup())
 	await state.set_state(TimesheetStates.waiting_remove_date)
 	asyncio.create_task(auto_delete_message(message, 3))
 
 
-@router.callback_query(F.data.startswith("removeshift:"))
-async def cb_removeshift(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-	"""Подтверждение удаления смены"""
-	timesheet_id = int(callback.data.split(":", 1)[1])
-	
+@router.callback_query(F.data.startswith("rmshift_user:"))
+async def cb_rmshift_user(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+	"""Менеджер выбрал сотрудника для удаления смены."""
+	if not await is_manager_db(callback.from_user.id, session):
+		await callback.answer("❌ Нет доступа", show_alert=True)
+		return
+
+	target_user_id = int(callback.data.split(":", 1)[1])
 	chat_id = callback.message.chat.id
-	user_id = callback.from_user.id
-	
-	# Получаем смену из БД
-	timesheet = await session.get(Timesheet, timesheet_id)
-	
-	if not timesheet:
-		await callback.answer("❌ Смена не найдена", show_alert=True)
+
+	# Получаем табель сотрудника
+	timesheets = (await session.execute(
+		select(Timesheet).where(
+			Timesheet.chat_id == chat_id,
+			Timesheet.user_id == target_user_id
+		).order_by(Timesheet.date.desc()).limit(30)
+	)).scalars().all()
+
+	member = await session.get(Member, {"chat_id": chat_id, "user_id": target_user_id})
+	member_name = member.display_name if member else str(target_user_id)
+
+	if not timesheets:
+		await callback.message.edit_text(f"❌ У {member_name} нет записей в табеле.")
 		await state.clear()
+		await callback.answer()
 		return
-	
-	# Проверяем права доступа
-	if timesheet.chat_id != chat_id or timesheet.user_id != user_id:
-		await callback.answer("❌ У вас нет прав на удаление этой смены", show_alert=True)
-		await state.clear()
-		return
-	
-	shift_names = {
-		"day": "дневная",
-		"night": "ночная"
-	}
-	shift_name = shift_names.get(timesheet.shift_type, timesheet.shift_type)
-	
-	# Создаем кнопки подтверждения
+
 	keyboard = InlineKeyboardBuilder()
-	keyboard.button(text="✅ Да, удалить", callback_data=f"removeshift_confirm:{timesheet_id}:yes")
-	keyboard.button(text="❌ Отмена", callback_data=f"removeshift_confirm:{timesheet_id}:no")
-	keyboard.adjust(2)
-	
+	for ts in timesheets:
+		label = f"{ts.date.strftime('%d.%m')} {'🌅' if ts.shift_type == 'day' else '🌙'}"
+		keyboard.button(text=label, callback_data=f"removeshift:{ts.id}")
+	keyboard.adjust(3)
+
 	await callback.message.edit_text(
-		f"🗑️ Подтверждение удаления\n\n"
-		f"📅 Дата: {timesheet.date.strftime('%d.%m.%Y')}\n"
-		f"⏰ Смена: {shift_name}\n\n"
-		f"Удалить эту смену из табеля?",
+		f"🗑 {member_name} — выберите смену для удаления:",
 		reply_markup=keyboard.as_markup()
 	)
-	
+	await callback.answer()
+
+
+@router.callback_query(F.data.startswith("removeshift:"))
+async def cb_removeshift(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+	"""Удаление записи из табеля."""
+	if not await is_manager_db(callback.from_user.id, session):
+		await callback.answer("❌ Нет доступа", show_alert=True)
+		return
+
+	timesheet_id = int(callback.data.split(":", 1)[1])
+	timesheet = await session.get(Timesheet, timesheet_id)
+
+	if not timesheet:
+		await callback.answer("❌ Запись не найдена", show_alert=True)
+		await state.clear()
+		return
+
+	shift_label = "🌅 день" if timesheet.shift_type == "day" else "🌙 ночь"
+	date_str = timesheet.date.strftime("%d.%m")
+
+	keyboard = InlineKeyboardBuilder()
+	keyboard.button(text="✅ Удалить", callback_data=f"removeshift_confirm:{timesheet_id}:yes")
+	keyboard.button(text="❌ Отмена", callback_data=f"removeshift_confirm:{timesheet_id}:no")
+	keyboard.adjust(2)
+
+	await callback.message.edit_text(
+		f"Удалить {date_str} {shift_label}?",
+		reply_markup=keyboard.as_markup()
+	)
 	await callback.answer()
 
 
 @router.callback_query(F.data.startswith("removeshift_confirm:"))
 async def cb_removeshift_confirm(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-	"""Окончательное удаление смены из табеля"""
+	"""Подтверждение удаления."""
+	if not await is_manager_db(callback.from_user.id, session):
+		await callback.answer("❌ Нет доступа", show_alert=True)
+		return
+
 	parts = callback.data.split(":")
 	timesheet_id = int(parts[1])
 	confirm = parts[2]
-	
+
 	if confirm == "no":
-		await callback.message.edit_text("❌ Удаление смены отменено.")
+		await callback.message.edit_text("❌ Отменено.")
 		await state.clear()
 		await callback.answer()
 		return
-	
-	chat_id = callback.message.chat.id
-	user_id = callback.from_user.id
-	
-	# Получаем смену из БД
+
 	timesheet = await session.get(Timesheet, timesheet_id)
-	
 	if not timesheet:
-		await callback.answer("❌ Смена не найдена", show_alert=True)
+		await callback.answer("❌ Запись не найдена", show_alert=True)
 		await state.clear()
 		return
-	
-	# Проверяем права доступа
-	if timesheet.chat_id != chat_id or timesheet.user_id != user_id:
-		await callback.answer("❌ У вас нет прав на удаление этой смены", show_alert=True)
-		await state.clear()
-		return
-	
-	shift_names = {
-		"day": "дневная",
-		"night": "ночная"
-	}
-	shift_name = shift_names.get(timesheet.shift_type, timesheet.shift_type)
-	date_str = timesheet.date.strftime("%d.%m.%Y")
-	
-	# Удаляем смену
+
+	date_str = timesheet.date.strftime("%d.%m")
+	shift_label = "🌅" if timesheet.shift_type == "day" else "🌙"
+
 	await session.delete(timesheet)
 	await session.commit()
-	
-	await callback.message.edit_text(
-		f"✅ Смена удалена!\n\n"
-		f"📅 {date_str} — {shift_name}"
-	)
-	
-	# Удаляем сообщение через 10 секунд
-	asyncio.create_task(auto_delete_message(callback.message, 10))
-	
+
+	await callback.message.edit_text(f"✅ Удалено: {date_str} {shift_label}")
 	await state.clear()
-	await callback.answer("✅ Удалено!") 
+	await callback.answer("✅ Удалено!")
