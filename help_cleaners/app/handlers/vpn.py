@@ -1,6 +1,6 @@
 """
 Модуль продажи VPN.
-Пользователь: /vpn → Купить → AAIO оплата → автовыдача конфига.
+Пользователь: /vpn → Купить → Lava оплата → автовыдача конфига.
 Админ: /vpn → панель заказов; /clear_orders → сброс.
 """
 
@@ -22,11 +22,11 @@ from app.config import (
     VPN_PRICE_AMOUNT,
     VPN_TRAFFIC_LIMIT_GB,
     VPN_DURATION_DAYS,
-    AAIO_MERCHANT_ID,
+    LAVA_SHOP_ID,
 )
 from app.db.models import VpnOrder
 from app.vpn_manager import xui_client
-from app import aaio_client
+from app import lava_client
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -192,7 +192,7 @@ async def _show_admin_panel(message: Message, session: AsyncSession):
 
 
 # ═══════════════════════════════════════════════════
-#  Пользовательский flow: покупка через AAIO
+#  Пользовательский flow: покупка через Lava
 # ═══════════════════════════════════════════════════
 
 @router.callback_query(F.data == "vpn:show")
@@ -208,7 +208,7 @@ async def on_vpn_show(callback: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(F.data == "vpn:buy")
 async def on_vpn_buy(callback: CallbackQuery, session: AsyncSession):
-    """Пользователь нажал 'Купить VPN' — создаём счёт в AAIO."""
+    """Пользователь нажал 'Купить VPN' — создаём счёт в Lava."""
     user = callback.from_user
     username = user.username or f"id{user.id}"
     is_admin = user.id == OWNER_ID
@@ -241,17 +241,18 @@ async def on_vpn_buy(callback: CallbackQuery, session: AsyncSession):
     await session.commit()
     await session.refresh(order)
 
-    aaio_oid = f"vpn_{order.id}_{int(datetime.utcnow().timestamp())}"
-    order.aaio_order_id = aaio_oid
+    pay_oid = f"vpn_{order.id}_{int(datetime.utcnow().timestamp())}"
+    order.aaio_order_id = pay_oid
     await session.commit()
 
-    # Создаём счёт в AAIO
-    if AAIO_MERCHANT_ID:
-        pay_url = await aaio_client.create_payment(
-            order_id=aaio_oid,
+    # Создаём счёт в Lava
+    if LAVA_SHOP_ID:
+        lava_result = await lava_client.create_payment(
+            order_id=pay_oid,
             amount=VPN_PRICE_AMOUNT,
-            description=f"VPN {VPN_TRAFFIC_LIMIT_GB}GB / {VPN_DURATION_DAYS}d",
+            comment=f"VPN {VPN_TRAFFIC_LIMIT_GB}GB / {VPN_DURATION_DAYS}d",
         )
+        pay_url = lava_result["url"] if lava_result else None
     else:
         pay_url = None
 
@@ -271,7 +272,7 @@ async def on_vpn_buy(callback: CallbackQuery, session: AsyncSession):
             reply_markup=kb,
         )
     else:
-        # Fallback: AAIO не настроен — ручное подтверждение админом
+        # Fallback: Lava не настроен — ручное подтверждение админом
         kb = InlineKeyboardBuilder()
         kb.button(text="❌ Отмена", callback_data=f"vpn:cancel:{order.id}")
         await callback.message.edit_text(
@@ -301,7 +302,7 @@ async def on_vpn_buy(callback: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(F.data.startswith("vpn:check:"))
 async def on_vpn_check(callback: CallbackQuery, session: AsyncSession):
-    """Пользователь нажал 'Проверить оплату' — опрашиваем AAIO."""
+    """Пользователь нажал 'Проверить оплату' — опрашиваем Lava."""
     order_id = int(callback.data.split(":")[2])
     order = (await session.execute(
         select(VpnOrder).where(VpnOrder.id == order_id)
@@ -321,9 +322,10 @@ async def on_vpn_check(callback: CallbackQuery, session: AsyncSession):
 
     await callback.answer("⏳ Проверяю оплату...")
 
-    info = await aaio_client.check_order_status(order.aaio_order_id)
+    info = await lava_client.check_order_status(order.aaio_order_id)
+    lava_status = info.get("data", {}).get("status") if info and info.get("data") else None
 
-    if info and info.get("type") == "success" and info.get("status") == "success":
+    if lava_status == "success":
         order.paid_at = datetime.utcnow()
         await session.commit()
 
@@ -348,16 +350,15 @@ async def on_vpn_check(callback: CallbackQuery, session: AsyncSession):
                 )
             except Exception:
                 pass
-    elif info and info.get("status") == "expired":
+    elif lava_status == "expired":
         order.status = "expired"
         await session.commit()
         await callback.message.edit_text(
             "⏰ Срок оплаты истёк. Нажмите /vpn чтобы создать новый счёт."
         )
     else:
-        status = info.get("status", "unknown") if info else "no_response"
         await callback.answer(
-            f"Оплата ещё не поступила (статус: {status}).\nПопробуйте позже.",
+            f"Оплата ещё не поступила (статус: {lava_status or 'unknown'}).\nПопробуйте позже.",
             show_alert=True,
         )
 

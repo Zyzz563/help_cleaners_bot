@@ -41,12 +41,11 @@ VPN_DURATION_DAYS = int(os.getenv("VPN_DURATION_DAYS", "30"))
 VPN_PRICE = os.getenv("VPN_PRICE", "299₽")
 VPN_PRICE_AMOUNT = float(os.getenv("VPN_PRICE_AMOUNT", "299"))
 
-# ─── AAIO (платёжный агрегатор) ───
-AAIO_MERCHANT_ID = os.getenv("AAIO_MERCHANT_ID", "")
-AAIO_SECRET_1 = os.getenv("AAIO_SECRET_1", "")
-AAIO_SECRET_2 = os.getenv("AAIO_SECRET_2", "")
-AAIO_API_KEY = os.getenv("AAIO_API_KEY", "")
-AAIO_WEBHOOK_PORT = int(os.getenv("AAIO_WEBHOOK_PORT", "8080"))
+# ─── LAVA (платёжный агрегатор lava.ru) ───
+LAVA_SHOP_ID = os.getenv("LAVA_SHOP_ID", "")
+LAVA_SECRET_KEY = os.getenv("LAVA_SECRET_KEY", "")
+LAVA_WEBHOOK_SECRET = os.getenv("LAVA_WEBHOOK_SECRET", "")
+LAVA_WEBHOOK_PORT = int(os.getenv("LAVA_WEBHOOK_PORT", "8080"))
 
 
 @dataclass
