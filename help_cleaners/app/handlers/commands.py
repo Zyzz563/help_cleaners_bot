@@ -333,11 +333,15 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
 	"""
 	# Если это личное сообщение
 	if message.chat.type == "private":
+		kb = InlineKeyboardBuilder()
+		kb.button(text="🔐 Купить VPN", callback_data="vpn:show")
 		await message.reply(
 			"👋 Привет! Я бот для клинеров.\n\n"
 			"Добавьте меня в группу и выполните /addchat.\n"
-			"Подробнее: /help",
-			parse_mode="HTML"
+			"Подробнее: /help\n\n"
+			"🔐 Также доступен VPN-сервис:",
+			parse_mode="HTML",
+			reply_markup=kb.as_markup(),
 		)
 		return
 	

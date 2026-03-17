@@ -10,8 +10,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.handlers import commands_router, photos_router
-from app.db.models import Base, Shift, Timesheet, Group, Manager
+from app.handlers import commands_router, photos_router, vpn_router
+from app.db.models import Base, Shift, Timesheet, Group, Manager, VpnOrder
 from app.config import DEFAULT_TZ
 
 # Configure logging
@@ -96,6 +96,7 @@ dp.update.outer_middleware(DebugMiddleware())
 dp.update.outer_middleware(DbSessionMiddleware(session_maker))
 
 # Include routers
+dp.include_router(vpn_router)
 dp.include_router(commands_router)
 dp.include_router(photos_router)
 

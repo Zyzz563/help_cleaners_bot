@@ -29,6 +29,22 @@ ALLOWED_CHATS = [
 ]
 
 
+# ─── VPN (3x-ui VLESS + Reality) ───
+VPN_PANEL_URL = os.getenv("VPN_PANEL_URL", "http://213.108.20.89:54321")
+VPN_PANEL_USER = os.getenv("VPN_PANEL_USER", "root")
+VPN_PANEL_PASS = os.getenv("VPN_PANEL_PASS", "T74pR3ieR3wQ")
+VPN_SERVER_IP = os.getenv("VPN_SERVER_IP", "213.108.20.89")
+VPN_SERVER_PORT = int(os.getenv("VPN_SERVER_PORT", "443"))
+VPN_INBOUND_ID = int(os.getenv("VPN_INBOUND_ID", "1"))
+VPN_TRAFFIC_LIMIT_GB = int(os.getenv("VPN_TRAFFIC_LIMIT_GB", "50"))
+VPN_DURATION_DAYS = int(os.getenv("VPN_DURATION_DAYS", "30"))
+VPN_PRICE = os.getenv("VPN_PRICE", "299₽")
+VPN_PAYMENT_DETAILS = os.getenv(
+    "VPN_PAYMENT_DETAILS",
+    "💳 Перевод на карту Сбербанк:\n<code>0000 0000 0000 0000</code>\n\n💰 Сумма: 299₽",
+)
+
+
 @dataclass
 class Settings:
     bot_token: str

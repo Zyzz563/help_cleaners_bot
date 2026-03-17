@@ -174,6 +174,31 @@ class Manager(Base):
 	approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class VpnOrder(Base):
+	"""
+	Заказы VPN — отслеживание покупок.
+	Статус: pending → active / rejected / expired
+	"""
+	__tablename__ = "vpn_orders"
+
+	id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+	user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+	username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+	uuid: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+	status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+	traffic_limit_gb: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
+	duration_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+	vless_link: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+	created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+	paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+	activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+	__table_args__ = (
+		Index("ix_vpn_orders_user", "user_id"),
+		Index("ix_vpn_orders_status", "status"),
+	)
+
+
 class AllowedChat(Base):
 	"""
 	Разрешенные чаты для работы бота.
