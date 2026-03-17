@@ -46,98 +46,146 @@ class XUIClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    # ──────────────────────────────────────────────
-    #  Авторизация
-    # ──────────────────────────────────────────────
     async def get_token(self) -> bool:
         """
         Авторизация в панели 3x-ui.
         Отправляет логин/пароль, сохраняет сессионную куку.
-        Возвращает True при успешной авторизации.
         """
+        # Закрываем старую сессию чтобы куки не протухли
+        await self.close()
         session = await self._ensure_session()
+
+        url = f"{self.base_url}/login"
+        print(f"[VPN-DEBUG] Авторизация: POST {url}")
+        print(f"[VPN-DEBUG] Логин: {self.username}")
+
         try:
             async with session.post(
-                f"{self.base_url}/login",
+                url,
                 data={"username": self.username, "password": self.password},
                 timeout=aiohttp.ClientTimeout(total=15),
+                ssl=False,
             ) as resp:
-                result = await resp.json()
+                status = resp.status
+                body = await resp.text()
+                print(f"[VPN-DEBUG] Ответ login: status={status}")
+                print(f"[VPN-DEBUG] Ответ login body: {body[:500]}")
+                print(f"[VPN-DEBUG] Куки после login: {session.cookie_jar.filter_cookies(self.base_url)}")
+
+                if status != 200:
+                    print(f"[VPN-DEBUG] ОШИБКА: HTTP {status} при авторизации")
+                    return False
+
+                try:
+                    result = json.loads(body)
+                except json.JSONDecodeError:
+                    print(f"[VPN-DEBUG] ОШИБКА: ответ не JSON — {body[:200]}")
+                    return False
+
                 if result.get("success"):
-                    logger.info("3x-ui: авторизация успешна")
+                    print("[VPN-DEBUG] Авторизация УСПЕШНА ✓")
                     return True
-                logger.error(f"3x-ui: ошибка авторизации — {result}")
+
+                print(f"[VPN-DEBUG] ОШИБКА авторизации: {result}")
                 return False
+        except aiohttp.ClientConnectorError as e:
+            print(f"[VPN-DEBUG] НЕ УДАЛОСЬ ПОДКЛЮЧИТЬСЯ к {url}: {e}")
+            return False
         except Exception as e:
-            logger.error(f"3x-ui: не удалось подключиться к панели — {e}")
+            print(f"[VPN-DEBUG] ИСКЛЮЧЕНИЕ при авторизации: {type(e).__name__}: {e}")
             return False
 
-    # ──────────────────────────────────────────────
-    #  Получение информации об Inbound
-    # ──────────────────────────────────────────────
     async def get_inbound_info(self, inbound_id: int) -> dict | None:
-        """
-        Получает настройки inbound — нужны для извлечения
-        publicKey и shortIds из Reality-конфигурации.
-        """
+        """Получает настройки inbound для извлечения Reality-ключей."""
         session = await self._ensure_session()
+        url = f"{self.base_url}/panel/api/inbounds/get/{inbound_id}"
+        print(f"[VPN-DEBUG] Получение inbound: GET {url}")
+
         try:
             async with session.get(
-                f"{self.base_url}/panel/api/inbounds/get/{inbound_id}",
+                url,
                 timeout=aiohttp.ClientTimeout(total=15),
+                ssl=False,
             ) as resp:
-                data = await resp.json()
-                if not data.get("success"):
-                    logger.error(f"3x-ui: не удалось получить inbound — {data}")
+                status = resp.status
+                body = await resp.text()
+                print(f"[VPN-DEBUG] Ответ inbound: status={status}")
+                print(f"[VPN-DEBUG] Ответ inbound body: {body[:800]}")
+
+                if status != 200:
+                    print(f"[VPN-DEBUG] ОШИБКА: HTTP {status} при получении inbound")
                     return None
+
+                data = json.loads(body)
+                if not data.get("success"):
+                    print(f"[VPN-DEBUG] ОШИБКА: inbound не получен — {data}")
+                    return None
+
+                print("[VPN-DEBUG] Inbound получен ✓")
                 return data.get("obj")
         except Exception as e:
-            logger.error(f"3x-ui: ошибка получения inbound — {e}")
+            print(f"[VPN-DEBUG] ИСКЛЮЧЕНИЕ при получении inbound: {type(e).__name__}: {e}")
             return None
 
-    # ──────────────────────────────────────────────
-    #  Создание VPN-клиента
-    # ──────────────────────────────────────────────
     async def add_vpn_client(self, user_id: int, username: str) -> dict | None:
         """
         Создаёт нового VPN-клиента в панели 3x-ui.
-
-        Возвращает словарь {uuid, vless_link, expires_at_ms, traffic_limit_gb, email}
-        или None при ошибке.
+        Возвращает {uuid, vless_link, expires_at_ms, traffic_limit_gb, email} или None.
         """
-        # Авторизация (каждый раз свежая — куки могут протухнуть)
+        print(f"[VPN-DEBUG] === Создание VPN-клиента для user_id={user_id}, username={username} ===")
+        print(f"[VPN-DEBUG] Панель: {self.base_url}")
+
+        # Шаг 1: авторизация
         if not await self.get_token():
+            print("[VPN-DEBUG] ПРОВАЛ: авторизация не пройдена")
             return None
 
-        # Получаем Reality-ключи из настроек inbound
+        # Шаг 2: получаем Reality-ключи из inbound
         inbound = await self.get_inbound_info(VPN_INBOUND_ID)
         if not inbound:
+            print("[VPN-DEBUG] ПРОВАЛ: не удалось получить inbound")
             return None
 
+        # Парсим streamSettings — может быть строкой или dict
         stream_raw = inbound.get("streamSettings", "{}")
         stream_settings = json.loads(stream_raw) if isinstance(stream_raw, str) else stream_raw
+        print(f"[VPN-DEBUG] streamSettings keys: {list(stream_settings.keys())}")
 
         reality_settings = stream_settings.get("realitySettings", {})
-        public_key = reality_settings.get("settings", {}).get("publicKey", "")
+        print(f"[VPN-DEBUG] realitySettings keys: {list(reality_settings.keys())}")
+
+        # publicKey лежит в realitySettings.settings.publicKey
+        settings_inner = reality_settings.get("settings", {})
+        public_key = settings_inner.get("publicKey", "")
         short_ids = reality_settings.get("shortIds", [])
         short_id = short_ids[0] if short_ids else ""
-
         server_names = reality_settings.get("serverNames", ["www.microsoft.com"])
         sni = server_names[0] if server_names else "www.microsoft.com"
 
+        print(f"[VPN-DEBUG] publicKey: {public_key[:20]}..." if public_key else "[VPN-DEBUG] publicKey: ПУСТО!")
+        print(f"[VPN-DEBUG] shortId: {short_id}")
+        print(f"[VPN-DEBUG] sni: {sni}")
+
         if not public_key:
-            logger.error("3x-ui: не найден publicKey в Reality-настройках")
+            print("[VPN-DEBUG] ПРОВАЛ: publicKey не найден в Reality-настройках")
+            # Пробуем альтернативные пути
+            print(f"[VPN-DEBUG] Полный realitySettings: {json.dumps(reality_settings, indent=2)[:500]}")
             return None
 
-        # Генерируем уникальные данные клиента
+        # Шаг 3: генерируем UUID и параметры
         client_uuid = str(uuid.uuid4())
         email = f"tg_{user_id}_{username}"
-
         expires_at_ms = int(
             (datetime.utcnow() + timedelta(days=VPN_DURATION_DAYS)).timestamp() * 1000
         )
         traffic_bytes = VPN_TRAFFIC_LIMIT_GB * 1024 * 1024 * 1024
 
+        print(f"[VPN-DEBUG] UUID: {client_uuid}")
+        print(f"[VPN-DEBUG] email: {email}")
+        print(f"[VPN-DEBUG] трафик: {traffic_bytes} байт ({VPN_TRAFFIC_LIMIT_GB} ГБ)")
+        print(f"[VPN-DEBUG] истекает: {expires_at_ms} ({VPN_DURATION_DAYS} дней)")
+
+        # Шаг 4: добавляем клиента через API
         client_payload = {
             "id": VPN_INBOUND_ID,
             "settings": json.dumps({
@@ -155,21 +203,36 @@ class XUIClient:
             }),
         }
 
+        url = f"{self.base_url}/panel/api/inbounds/addClient"
+        print(f"[VPN-DEBUG] Добавление клиента: POST {url}")
+        print(f"[VPN-DEBUG] Payload: {json.dumps(client_payload, indent=2)[:600]}")
+
         session = await self._ensure_session()
         try:
             async with session.post(
-                f"{self.base_url}/panel/api/inbounds/addClient",
+                url,
                 json=client_payload,
                 timeout=aiohttp.ClientTimeout(total=15),
+                ssl=False,
             ) as resp:
-                result = await resp.json()
+                status = resp.status
+                body = await resp.text()
+                print(f"[VPN-DEBUG] Ответ addClient: status={status}")
+                print(f"[VPN-DEBUG] Ответ addClient body: {body[:500]}")
+
+                if status != 200:
+                    print(f"[VPN-DEBUG] ОШИБКА: HTTP {status} при добавлении клиента")
+                    return None
+
+                result = json.loads(body)
                 if not result.get("success"):
-                    logger.error(f"3x-ui: не удалось добавить клиента — {result}")
+                    print(f"[VPN-DEBUG] ОШИБКА API: {result}")
                     return None
         except Exception as e:
-            logger.error(f"3x-ui: ошибка при добавлении клиента — {e}")
+            print(f"[VPN-DEBUG] ИСКЛЮЧЕНИЕ при addClient: {type(e).__name__}: {e}")
             return None
 
+        # Шаг 5: генерируем VLESS-ссылку
         vless_link = self._generate_vless_link(
             client_uuid=client_uuid,
             remark=email,
@@ -178,7 +241,8 @@ class XUIClient:
             sni=sni,
         )
 
-        logger.info(f"VPN-клиент создан: user_id={user_id}, uuid={client_uuid}")
+        print(f"[VPN-DEBUG] УСПЕХ ✓ VPN-клиент создан!")
+        print(f"[VPN-DEBUG] VLESS-ссылка: {vless_link[:80]}...")
 
         return {
             "uuid": client_uuid,
@@ -188,9 +252,6 @@ class XUIClient:
             "email": email,
         }
 
-    # ──────────────────────────────────────────────
-    #  Генерация VLESS-ссылки
-    # ──────────────────────────────────────────────
     def _generate_vless_link(
         self,
         client_uuid: str,

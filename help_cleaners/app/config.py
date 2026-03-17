@@ -30,6 +30,8 @@ ALLOWED_CHATS = [
 
 
 # ─── VPN (3x-ui VLESS + Reality) ───
+# ВАЖНО: если в 3x-ui настроен Web Base Path (напр. /HHOcx),
+# то URL должен быть: http://213.108.20.89:54321/HHOcx
 VPN_PANEL_URL = os.getenv("VPN_PANEL_URL", "http://213.108.20.89:54321")
 VPN_PANEL_USER = os.getenv("VPN_PANEL_USER", "root")
 VPN_PANEL_PASS = os.getenv("VPN_PANEL_PASS", "T74pR3ieR3wQ")
@@ -41,7 +43,7 @@ VPN_DURATION_DAYS = int(os.getenv("VPN_DURATION_DAYS", "30"))
 VPN_PRICE = os.getenv("VPN_PRICE", "299₽")
 VPN_PAYMENT_DETAILS = os.getenv(
     "VPN_PAYMENT_DETAILS",
-    "💳 Перевод на карту Сбербанк:\n<code>0000 0000 0000 0000</code>\n\n💰 Сумма: 299₽",
+    "💳 Перевод на карту Сбербанк:\n<code>2202 2082 7538 6655</code>\n\n💰 Сумма: 299₽",
 )
 
 
