@@ -7,12 +7,14 @@ from typing import Any, Awaitable, Callable, Dict
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.types import TelegramObject, Update
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiohttp import web
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.handlers import commands_router, photos_router, vpn_router
 from app.db.models import Base, Shift, Timesheet, Group, Manager, VpnOrder
-from app.config import DEFAULT_TZ
+from app.config import DEFAULT_TZ, AAIO_WEBHOOK_PORT, AAIO_MERCHANT_ID
+from app import aaio_client
 
 # Configure logging
 logging.basicConfig(
@@ -201,6 +203,121 @@ async def auto_confirm_shifts(sm: async_sessionmaker[AsyncSession]):
         await asyncio.sleep(30 * 60)  # Каждые 30 минут
 
 
+async def aaio_webhook_handler(request: web.Request) -> web.Response:
+    """
+    Принимает POST от AAIO при успешной оплате.
+    Проверяет подпись, активирует VPN, отправляет конфиг пользователю.
+    """
+    try:
+        data = await request.post()
+        data = dict(data)
+        print(f"[AAIO-WEBHOOK] Получен запрос: {data}")
+
+        if not aaio_client.verify_webhook_sign(data):
+            print("[AAIO-WEBHOOK] Неверная подпись — отклонено")
+            return web.Response(text="bad sign", status=400)
+
+        order_id_str = data.get("order_id", "")
+        print(f"[AAIO-WEBHOOK] Обработка order_id={order_id_str}")
+
+        async with session_maker() as session:
+            order = (await session.execute(
+                select(VpnOrder).where(VpnOrder.aaio_order_id == order_id_str)
+            )).scalar_one_or_none()
+
+            if not order:
+                print(f"[AAIO-WEBHOOK] Заказ не найден: {order_id_str}")
+                return web.Response(text="order not found", status=404)
+
+            if order.status == "active":
+                print(f"[AAIO-WEBHOOK] Заказ уже активен: #{order.id}")
+                return web.Response(text="OK")
+
+            order.paid_at = datetime.utcnow()
+            await session.commit()
+
+            from app.handlers.vpn import activate_vpn_order
+            ok = await activate_vpn_order(order, session, bot)
+
+            if ok:
+                print(f"[AAIO-WEBHOOK] VPN выдан: order #{order.id}, user {order.user_id}")
+                try:
+                    await bot.send_message(
+                        OWNER_ID,
+                        f"✅ Авто-оплата: @{order.username} (#{order.id}) — VPN выдан!",
+                    )
+                except Exception:
+                    pass
+            else:
+                print(f"[AAIO-WEBHOOK] Ошибка создания VPN для order #{order.id}")
+                try:
+                    await bot.send_message(
+                        OWNER_ID,
+                        f"⚠️ Оплата #{order.id} @{order.username} прошла, "
+                        f"но VPN не создан! Проверьте 3x-ui.",
+                    )
+                except Exception:
+                    pass
+
+        return web.Response(text="OK")
+    except Exception as e:
+        print(f"[AAIO-WEBHOOK] Ошибка: {e}")
+        return web.Response(text="error", status=500)
+
+
+async def aaio_payment_poller(sm: async_sessionmaker[AsyncSession]):
+    """
+    Фоновая задача: каждые 60 секунд проверяет pending-заказы через AAIO API.
+    Если оплата прошла — автоматически активирует VPN.
+    """
+    await asyncio.sleep(10)
+    while True:
+        try:
+            if not AAIO_MERCHANT_ID:
+                await asyncio.sleep(60)
+                continue
+
+            async with sm() as session:
+                cutoff = datetime.utcnow() - timedelta(minutes=2)
+                orders = (await session.execute(
+                    select(VpnOrder).where(
+                        VpnOrder.status == "pending",
+                        VpnOrder.aaio_order_id.isnot(None),
+                        VpnOrder.created_at <= cutoff,
+                    )
+                )).scalars().all()
+
+                for order in orders:
+                    info = await aaio_client.check_order_status(order.aaio_order_id)
+                    if not info or info.get("type") != "success":
+                        continue
+
+                    if info.get("status") == "success":
+                        print(f"[POLLER] Оплата подтверждена для order #{order.id}")
+                        order.paid_at = datetime.utcnow()
+                        await session.commit()
+
+                        from app.handlers.vpn import activate_vpn_order
+                        ok = await activate_vpn_order(order, session, bot)
+                        if ok:
+                            try:
+                                await bot.send_message(
+                                    OWNER_ID,
+                                    f"✅ Авто-оплата (poller): @{order.username} (#{order.id}) — VPN выдан!",
+                                )
+                            except Exception:
+                                pass
+
+                    elif info.get("status") == "expired":
+                        order.status = "expired"
+                        await session.commit()
+
+        except Exception as e:
+            logger.error(f"[POLLER] Ошибка: {e}")
+
+        await asyncio.sleep(60)
+
+
 async def main():
     """Main function"""
     logger.info("Starting bot...")
@@ -209,9 +326,21 @@ async def main():
         # Startup
         await on_startup(bot, engine)
 
-        # Запускаем фоновую задачу авто-подтверждения смен
+        # Фоновые задачи
         asyncio.create_task(auto_confirm_shifts(session_maker))
         logger.info("Auto-confirm background task started")
+
+        asyncio.create_task(aaio_payment_poller(session_maker))
+        logger.info("AAIO payment poller started")
+
+        # Webhook-сервер для AAIO
+        app = web.Application()
+        app.router.add_post("/aaio/webhook", aaio_webhook_handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", AAIO_WEBHOOK_PORT)
+        await site.start()
+        logger.info(f"AAIO webhook server listening on port {AAIO_WEBHOOK_PORT}")
 
         # Start polling
         logger.info("Starting polling...")

@@ -153,4 +153,28 @@ async def run_startup_migrations(engine: AsyncEngine) -> None:
 			""")
 			await conn.exec_driver_sql("INSERT INTO shifts SELECT * FROM shifts_old")
 			await conn.exec_driver_sql("DROP TABLE shifts_old")
-			await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_shift_chat_date_type ON shifts (chat_id, date, type)") 
+			await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_shift_chat_date_type ON shifts (chat_id, date, type)")
+
+		# vpn_orders table
+		await conn.exec_driver_sql("""
+			CREATE TABLE IF NOT EXISTS vpn_orders (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id BIGINT NOT NULL,
+				username VARCHAR(64) NULL,
+				aaio_order_id VARCHAR(64) NULL UNIQUE,
+				uuid VARCHAR(36) NULL,
+				status VARCHAR(16) NOT NULL DEFAULT 'pending',
+				traffic_limit_gb INTEGER NOT NULL DEFAULT 50,
+				duration_days INTEGER NOT NULL DEFAULT 30,
+				vless_link VARCHAR(1024) NULL,
+				created_at TIMESTAMP NOT NULL,
+				paid_at TIMESTAMP NULL,
+				activated_at TIMESTAMP NULL
+			)
+		""")
+
+		# Миграция: добавить aaio_order_id если таблица уже существует без него
+		res = await conn.exec_driver_sql("PRAGMA table_info('vpn_orders')")
+		vpn_cols = [row[1] for row in res.fetchall()]
+		if "aaio_order_id" not in vpn_cols:
+			await conn.exec_driver_sql("ALTER TABLE vpn_orders ADD COLUMN aaio_order_id VARCHAR(64) NULL") 

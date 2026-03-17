@@ -30,9 +30,7 @@ ALLOWED_CHATS = [
 
 
 # ─── VPN (3x-ui VLESS + Reality) ───
-# ВАЖНО: если в 3x-ui настроен Web Base Path (напр. /HHOcx),
-# то URL должен быть: http://213.108.20.89:54321/HHOcx
-VPN_PANEL_URL = os.getenv("VPN_PANEL_URL", "http://213.108.20.89:54321")
+VPN_PANEL_URL = os.getenv("VPN_PANEL_URL", "https://213.108.20.89:54321/HHOcxs73RFIP3gp016")
 VPN_PANEL_USER = os.getenv("VPN_PANEL_USER", "root")
 VPN_PANEL_PASS = os.getenv("VPN_PANEL_PASS", "T74pR3ieR3wQ")
 VPN_SERVER_IP = os.getenv("VPN_SERVER_IP", "213.108.20.89")
@@ -41,10 +39,14 @@ VPN_INBOUND_ID = int(os.getenv("VPN_INBOUND_ID", "1"))
 VPN_TRAFFIC_LIMIT_GB = int(os.getenv("VPN_TRAFFIC_LIMIT_GB", "50"))
 VPN_DURATION_DAYS = int(os.getenv("VPN_DURATION_DAYS", "30"))
 VPN_PRICE = os.getenv("VPN_PRICE", "299₽")
-VPN_PAYMENT_DETAILS = os.getenv(
-    "VPN_PAYMENT_DETAILS",
-    "💳 Перевод на карту Сбербанк:\n<code>2202 2082 7538 6655</code>\n\n💰 Сумма: 299₽",
-)
+VPN_PRICE_AMOUNT = float(os.getenv("VPN_PRICE_AMOUNT", "299"))
+
+# ─── AAIO (платёжный агрегатор) ───
+AAIO_MERCHANT_ID = os.getenv("AAIO_MERCHANT_ID", "")
+AAIO_SECRET_1 = os.getenv("AAIO_SECRET_1", "")
+AAIO_SECRET_2 = os.getenv("AAIO_SECRET_2", "")
+AAIO_API_KEY = os.getenv("AAIO_API_KEY", "")
+AAIO_WEBHOOK_PORT = int(os.getenv("AAIO_WEBHOOK_PORT", "8080"))
 
 
 @dataclass

@@ -177,13 +177,14 @@ class Manager(Base):
 class VpnOrder(Base):
 	"""
 	Заказы VPN — отслеживание покупок.
-	Статус: pending → active / rejected / expired
+	Статус: pending → paid → active / rejected / error / expired
 	"""
 	__tablename__ = "vpn_orders"
 
 	id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 	user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 	username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+	aaio_order_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True)
 	uuid: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
 	status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
 	traffic_limit_gb: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
